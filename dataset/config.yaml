@@ -1,0 +1,6 @@
+model:
+  input_path: /home/NAS/homes/cjchen-10025/data/worldfloods_v2/data/test/S2/EMSR342_07SOUTHNORMANTON_DEL_MONIT03_v2.tif
+  output_path: /home/NAS/homes/cjchen-10025/ML4FloodsUncertainty/result/EMSR342_07SOUTHNORMANTON_DEL_MONIT03_v2_output_EDL.tif
+watershed:
+  default_id: 5120274420
+  path: /home/NAS/homes/cjchen-10025/data/HydroBASINS/hybas_au_lev01-12_v1c/hybas_au_lev12_v1c.shp

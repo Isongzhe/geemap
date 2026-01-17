@@ -1,0 +1,16 @@
+[project]
+name = "geemap_flood"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "geemap>=0.36.6",
+    "geopandas>=1.1.2",
+    "localtileserver>=0.10.7",
+    "pyproj>=3.7.2",
+    "rasterio>=1.5.0",
+    "rioxarray>=0.20.0",
+    "solara>=1.56.0",
+]
+
