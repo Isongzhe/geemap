@@ -10,3 +10,4 @@ wheels/
 .venv
 .devcontainer/
 .vscode/
+CLAUDE.md
