@@ -1,10 +1,17 @@
 import solara
-import geemap
 import os
 import geopandas as gpd
+import ee
+import geemap
 from ipyleaflet import GeoJSON
 from src.step1.utils import get_candidate_watersheds, save_selected_watershed
 import src.state as state
+
+# Initialize Earth Engine with geemap-484609 project
+try:
+    ee.Initialize(project="geemap-484609")
+except Exception:
+    print("Note: Earth Engine initialization skipped")
 
 # Shared State
 selected_watershed_id = solara.reactive(None)
@@ -71,7 +78,7 @@ def Page():
             if gdf is not None:
                 solara.Text(f"Candidates Found: {len(gdf)}")
 
-        # Map
+        # Map - using geemap with project geemap-484609
         m = geemap.Map(center=[cy, cx], zoom=zoom,
                        toolbar_ctrl=False,
                        draw_ctrl=False,

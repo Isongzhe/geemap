@@ -2,7 +2,7 @@
 SESSION="geemap"
 
 echo "Cleaning up..."
-PORTS="8765 7777 7778 7779"
+PORTS="8765"
 for port in $PORTS; do
     echo "   Stopping process on port $port..."
     fuser -k -n tcp $port 2>/dev/null
@@ -13,27 +13,36 @@ sleep 2
 # Kill existing tmux session if it exists
 tmux kill-session -t $SESSION 2>/dev/null
 
-# Create new session
+# Create new session and start Solara
 echo "Starting new session..."
 tmux new-session -d -s $SESSION -n "solara"
 
-# Start Tile Servers
-# Unified Data Server (7777)
-tmux new-window -t $SESSION:1 -n "server"
-tmux send-keys -t $SESSION:server "uv run python src/step2/unified_server.py" C-m
-
-# Start Solara Step 2
+# Start Solara Application
 tmux send-keys -t $SESSION:solara "export PYTHONUNBUFFERED=1" C-m
-# Using --host 0.0.0.0 to ensure remote access
+# Add project root to PYTHONPATH for absolute imports
+tmux send-keys -t $SESSION:solara "export PYTHONPATH=\$(pwd):\$PYTHONPATH" C-m
+# Using --host 0.0.0.0 to ensure remote access and container support
 tmux send-keys -t $SESSION:solara "uv run solara run src/main.py --host=0.0.0.0 --port=8765" C-m
 
 echo "tmux session '$SESSION' started."
 
 echo "========================================================"
-echo "PLEASE CONFIGURE PORT FORWARDING ON YOUR LOCAL MACHINE:"
-echo "1. Port 8765 : Solara UI"
-echo "2. Port 7777 : Data Server (Unified)"
+echo "APPLICATION STARTED SUCCESSFULLY"
 echo "========================================================"
 echo ""
-echo "To view logs/attach:   tmux attach -t $SESSION"
-echo "To stop everything:    ./stop.sh"
+echo "Solara UI is running on port 8765"
+echo ""
+echo "Using VSCode Dev Container:"
+echo "  1. VSCode will auto-forward port 8765 to your local machine"
+echo "  2. Check VSCode 'PORTS' tab (next to Terminal)"
+echo "  3. Access: http://localhost:8765 in your browser"
+echo ""
+echo "If port forwarding doesn't appear automatically:"
+echo "  - Reload VSCode window (Cmd/Ctrl + Shift + P > Reload Window)"
+echo "  - Or manually forward in PORTS tab"
+echo ""
+echo "========================================================"
+echo "Useful commands:"
+echo "  View logs:   tmux attach -t $SESSION"
+echo "  Stop app:    ./stop.sh"
+echo "========================================================"

@@ -1,4 +1,5 @@
 import solara
 
 # Global Navigation State
-current_step = solara.reactive(1)
+# Temporarily focus on Step 2 only
+current_step = solara.reactive(2)
