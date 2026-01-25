@@ -10,5 +10,6 @@ wheels/
 .venv
 .devcontainer/
 .vscode/
-CLAUDE.md
+
+*CLAUDE.md
 *backup

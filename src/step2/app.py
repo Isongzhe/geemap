@@ -13,46 +13,45 @@ Features:
 
 import os
 import functools
+from pathlib import Path
 import solara
 import geemap
 import rioxarray
-import yaml
 import ee
 import geopandas as gpd
 from ipyleaflet import GeoJSON, SplitMapControl
 from localtileserver import TileClient, get_leaflet_tile_layer
 from pyproj import Transformer
 
-# ============================================================================
-# Configuration Constants
-# ============================================================================
-
-# Tile server configuration for remote access (e.g., VSCode dev containers)
-TILE_SERVER_HOST = '0.0.0.0'  # Listen on all network interfaces
-TILE_SERVER_PORT = 9000        # Fixed port for VSCode auto-forwarding
-CLIENT_HOST = 'localhost'      # Client-side host for tile requests
-
-# Earth Engine configuration
-EE_PROJECT = "geemap-484609"
-
-# Map configuration
-DEFAULT_CENTER = (20, 0)       # Default map center (lat, lon)
-DEFAULT_ZOOM = 2               # Default zoom level
-WATERSHED_ZOOM = 11            # Zoom level when watershed is loaded
-
-# Visualization parameters
-CLASSIFICATION_COLORMAP = 'viridis'
-UNCERTAINTY_COLORMAP = 'rdylgn_r'
-WATERSHED_COLOR = '#FFD700'    # Gold color for watershed boundary
-WATERSHED_LINE_WIDTH = 4
+import src.state as state
+from src.config import (
+    INPUT_TILE_PORT,
+    OUTPUT_TILE_PORT,
+    EE_PROJECT,
+    DEFAULT_CENTER,
+    DEFAULT_ZOOM,
+    WATERSHED_ZOOM,
+    CLASSIFICATION_COLORMAP,
+    UNCERTAINTY_COLORMAP,
+    WATERSHED_COLOR,
+    WATERSHED_LINE_WIDTH,
+    STEP2_TITLE,
+    load_yaml_config,
+    get_model_paths,
+    get_model_config,
+    get_watershed_config,
+)
+from src.step2.utils import find_event_input, find_event_output
 
 # ============================================================================
-# Environment Setup
+# Global TileClient Singleton
 # ============================================================================
 
-# Configure localtileserver for remote environments
-os.environ['REST_SERVER_HOST'] = TILE_SERVER_HOST
-os.environ['LOCALTILESERVER_CLIENT_PORT'] = str(TILE_SERVER_PORT)
+# Module-level cache to prevent recreating TileClient on hot-reload
+_tile_clients_cache = {}
+
+# Module-level reference to current SplitMapControl (singleton)
+_current_split_control = None
 
 # ============================================================================
 # Earth Engine Initialization
@@ -68,32 +67,53 @@ except Exception:
         print(f"[STEP2] Earth Engine initialization failed: {e}")
 
 # ============================================================================
-# Load Configuration
+# Configuration & File Discovery
 # ============================================================================
 
-try:
-    with open("dataset/config.yaml", "r") as f:
-        config_data = yaml.safe_load(f)
-        WATERSHED_CFG = config_data.get("watershed", {})
-        WATERSHED_PATH = WATERSHED_CFG.get("path")
-        WATERSHED_ID = WATERSHED_CFG.get("default_id")
-        INPUT_PATH = config_data["model"]["input_path"]
-        OUTPUT_PATH = config_data["model"]["output_path"]
-        print(f"[STEP2] Configuration loaded successfully")
-except Exception as e:
-    print(f"[STEP2] Configuration error: {e}")
-    WATERSHED_PATH = None
-    WATERSHED_ID = None
-    INPUT_PATH = None
-    OUTPUT_PATH = None
+# Get model configuration
+model_config = get_model_config()
+event_date = model_config.get("event_date")
+input_folder = model_config.get("input_folder")
+output_folder = model_config.get("output_folder")
+
+# Get return period from Step 1
+selected_return_period = state.selected_return_period.value
+
+print(f"[STEP2] Event Date: {event_date}")
+print(f"[STEP2] Return Period: {selected_return_period}")
+print(f"[STEP2] Input Folder: {input_folder}")
+print(f"[STEP2] Output Folder: {output_folder}")
+
+# Find files for this event
+INPUT_PATH = None
+OUTPUT_PATH = None
+
+if event_date and input_folder and output_folder:
+    input_file = find_event_input(event_date, input_folder)
+    output_file = find_event_output(event_date, output_folder)
+    
+    if input_file:
+        INPUT_PATH = str(input_file)
+    if output_file:
+        OUTPUT_PATH = str(output_file)
+
+if INPUT_PATH and OUTPUT_PATH:
+    print("[STEP2] Configuration loaded successfully")
+    print(f"[STEP2] Input: {Path(INPUT_PATH).name}")
+    print(f"[STEP2] Output: {Path(OUTPUT_PATH).name}")
+else:
+    print("[STEP2] Warning: Could not find input/output files for this event")
+
+# Re-adding watershed config for now, as it's used later and not part of the refactor instruction
+WATERSHED_CFG = get_watershed_config()
+WATERSHED_PATH = WATERSHED_CFG.get("path")
+WATERSHED_ID = WATERSHED_CFG.get("default_id")
 
 # ============================================================================
 # Reactive State
 # ============================================================================
 
-uncertainty_threshold = solara.reactive(0.5)
-show_split_map = solara.reactive(True)
-map_layer_mode = solara.reactive("Flood Classification") 
+map_layer_mode = solara.reactive("Flood Classification")  # "Flood Classification" or "Uncertainty" 
 
 # ============================================================================
 # Helper Functions
@@ -151,42 +171,45 @@ def _create_base_map():
 def _create_tile_clients():
     """
     Create TileClient instances for input and output GeoTIFF files.
-    Uses a fixed port for compatibility with remote development environments.
-    
+    Uses module-level singleton cache to prevent port conflicts on hot-reload.
+
+    Ports:
+        - Input (Sentinel-2): port 9000
+        - Output (Model): port 9001
+
     Returns:
         dict: Dictionary with 'input' and 'output' TileClient instances
     """
-    clients = {}
-    
-    # Create input TileClient (Sentinel-2 imagery)
+    global _tile_clients_cache
+
+    # Return cached clients if already created (singleton pattern)
+    if _tile_clients_cache:
+        print("[STEP2] Using cached TileClients")
+        return _tile_clients_cache
+
+    # Create Input TileClient
     if INPUT_PATH and os.path.exists(INPUT_PATH):
-        try:
-            clients['input'] = TileClient(
-                INPUT_PATH,
-                port=TILE_SERVER_PORT,
-                host=TILE_SERVER_HOST,
-                client_port=TILE_SERVER_PORT,
-                client_host=CLIENT_HOST
-            )
-            print(f"[STEP2] Input TileClient created: {clients['input'].client_base_url}")
-        except Exception as e:
-            print(f"[STEP2] Failed to create input TileClient: {e}")
-    
-    # Create output TileClient (model predictions)
+        _tile_clients_cache['input'] = TileClient(
+            INPUT_PATH,
+            port=INPUT_TILE_PORT,
+            host='0.0.0.0',
+            client_port=INPUT_TILE_PORT,
+            client_host='localhost'
+        )
+        print(f"[STEP2] Input TileClient created on port {INPUT_TILE_PORT}")
+
+    # Create Output TileClient
     if OUTPUT_PATH and os.path.exists(OUTPUT_PATH):
-        try:
-            clients['output'] = TileClient(
-                OUTPUT_PATH,
-                port=TILE_SERVER_PORT,
-                host=TILE_SERVER_HOST,
-                client_port=TILE_SERVER_PORT,
-                client_host=CLIENT_HOST
-            )
-            print(f"[STEP2] Output TileClient created: {clients['output'].client_base_url}")
-        except Exception as e:
-            print(f"[STEP2] Failed to create output TileClient: {e}")
-    
-    return clients
+        _tile_clients_cache['output'] = TileClient(
+            OUTPUT_PATH,
+            port=OUTPUT_TILE_PORT,
+            host='0.0.0.0',
+            client_port=OUTPUT_TILE_PORT,
+            client_host='localhost'
+        )
+        print(f"[STEP2] Output TileClient created on port {OUTPUT_TILE_PORT}")
+
+    return _tile_clients_cache
 
 
 def _create_watershed_layer():
@@ -230,14 +253,11 @@ def Page():
     
     Provides:
     - Interactive map with COG tile layers
-    - Split-map view for side-by-side comparison
+    - Split-map view (always enabled)
     - Layer mode selection (Classification vs Uncertainty)
-    - Uncertainty threshold filtering
     - Watershed boundary overlay
     """
     # Reactive state values
-    threshold = uncertainty_threshold.value
-    is_split = show_split_map.value
     layer_mode = map_layer_mode.value
     
     # Create map widget (memoized)
@@ -251,142 +271,161 @@ def Page():
     
     def update_layers():
         """
-        Update map layers based on current state (split mode, layer mode, threshold).
-        This function is called whenever reactive dependencies change.
+        Update map layers based on current layer mode.
+
+        Split view is always enabled:
+        - Classification mode: Left = Sentinel-2, Right = Classification
+        - Uncertainty mode: Left = Classification, Right = Uncertainty
         """
+        global _current_split_control
         m = map_widget
-        
+
         try:
-            # Clear existing layers and reset basemap
-            m.clear_layers()
-            m.add_basemap("OpenStreetMap")
-            
-            # Remove existing SplitMapControl to prevent duplication
-            # This fixes the split panel corruption issue when threshold changes
+            # IMPORTANT: Remove SplitMapControl FIRST, before clearing layers
+            # This prevents orphaned visual elements
+            if _current_split_control is not None:
+                try:
+                    m.remove_control(_current_split_control)
+                    print("[STEP2] Removed existing SplitMapControl")
+                except Exception:
+                    pass  # Control might already be removed
+                _current_split_control = None
+
+            # Also remove any other SplitMapControls (safety cleanup)
             controls_to_remove = [ctrl for ctrl in m.controls if isinstance(ctrl, SplitMapControl)]
             for ctrl in controls_to_remove:
-                m.remove_control(ctrl)
-            
+                try:
+                    m.remove_control(ctrl)
+                except Exception:
+                    pass
+
+            # Now clear layers and reset basemap
+            m.clear_layers()
+            m.add_basemap("OpenStreetMap")
+
             input_available = 'input' in tile_clients
             output_available = 'output' in tile_clients
-            
-            if is_split and input_available and output_available:
-                # Split-map mode: show input on left, output on right
-                print(f"[STEP2] Rendering split-map view")
-                
-                # Create input layer (Sentinel-2)
-                l_input = get_leaflet_tile_layer(
+
+            if not (input_available and output_available):
+                print("[STEP2] Missing input or output tiles")
+                return
+
+            # Create layers based on mode
+            if layer_mode == "Flood Classification":
+                # Left: Sentinel-2 original image
+                left_layer = get_leaflet_tile_layer(
                     tile_clients['input'],
                     name="Sentinel-2",
                     opacity=1.0
                 )
-                
-                # Create output layer based on selected mode
-                if layer_mode == "Flood Classification":
-                    l_output = get_leaflet_tile_layer(
-                        tile_clients['output'],
-                        name="Classification",
-                        indexes=[1],
-                        colormap=CLASSIFICATION_COLORMAP,
-                        opacity=0.7
-                    )
-                else:  # Uncertainty mode
-                    l_output = get_leaflet_tile_layer(
-                        tile_clients['output'],
-                        name="Uncertainty",
-                        indexes=[2],
-                        colormap=UNCERTAINTY_COLORMAP,
-                        vmin=0.0,
-                        vmax=threshold,
-                        opacity=0.7
-                    )
-                
-                # Add layers to map
-                m.add_layer(l_input)
-                m.add_layer(l_output)
-                
-                # Add split map control
-                split_control = SplitMapControl(left_layer=l_input, right_layer=l_output)
-                m.add_control(split_control)
-                
-            else:
-                # Single layer mode
-                if input_available:
-                    print(f"[STEP2] Adding Sentinel-2 layer")
-                    l_input = get_leaflet_tile_layer(
-                        tile_clients['input'],
-                        name="Sentinel-2",
-                        opacity=1.0
-                    )
-                    m.add_layer(l_input)
-                
-                if output_available:
-                    print(f"[STEP2] Adding {layer_mode} layer")
-                    if layer_mode == "Flood Classification":
-                        l_output = get_leaflet_tile_layer(
-                            tile_clients['output'],
-                            name="Classification",
-                            indexes=[1],
-                            colormap=CLASSIFICATION_COLORMAP,
-                            opacity=0.7
-                        )
-                    else:  # Uncertainty mode
-                        l_output = get_leaflet_tile_layer(
-                            tile_clients['output'],
-                            name="Uncertainty",
-                            indexes=[2],
-                            colormap=UNCERTAINTY_COLORMAP,
-                            vmin=0.0,
-                            vmax=threshold,
-                            opacity=0.7
-                        )
-                    m.add_layer(l_output)
-            
+
+                # Right: Flood classification
+                right_layer = get_leaflet_tile_layer(
+                    tile_clients['output'],
+                    name="Classification",
+                    indexes=[1],
+                    colormap=CLASSIFICATION_COLORMAP,
+                    opacity=0.7
+                )
+            else:  # Uncertainty mode
+                # Left: Flood classification
+                left_layer = get_leaflet_tile_layer(
+                    tile_clients['output'],
+                    name="Classification",
+                    indexes=[1],
+                    colormap=CLASSIFICATION_COLORMAP,
+                    opacity=0.7
+                )
+
+                # Right: Uncertainty map (full range 0-1)
+                right_layer = get_leaflet_tile_layer(
+                    tile_clients['output'],
+                    name="Uncertainty",
+                    indexes=[2],
+                    colormap=UNCERTAINTY_COLORMAP,
+                    vmin=0.0,
+                    vmax=1.0,  # Show full uncertainty range
+                    opacity=0.7
+                )
+
+            # Add layers to map
+            m.add_layer(left_layer)
+            m.add_layer(right_layer)
+
+            # Create and store new SplitMapControl
+            _current_split_control = SplitMapControl(left_layer=left_layer, right_layer=right_layer)
+            m.add_control(_current_split_control)
+
             # Always add watershed boundary on top
             if watershed_layer:
                 m.add_layer(watershed_layer)
-                
+
+            print(f"[STEP2] Rendered split-map: {layer_mode}")
+
         except Exception as e:
             print(f"[STEP2] Error updating layers: {e}")
             import traceback
             traceback.print_exc()
     
-    # Update layers when dependencies change
-    solara.use_effect(update_layers, dependencies=[is_split, layer_mode, threshold])
+    # Update layers when mode changes (not on every threshold change)
+    solara.use_effect(update_layers, dependencies=[layer_mode])
     
     # ========================================================================
     # UI Layout
     # ========================================================================
     
     with solara.Column(style={"height": "100vh"}):
-        solara.Title("Step 2: Flood Visualization")
+        solara.Title(STEP2_TITLE)
         
         with solara.Sidebar():
-            solara.Markdown("### Configuration")
+            # Event Information
+            solara.Markdown("### Event Information")
+            with solara.Card(elevation=0, style={"margin-bottom": "1rem"}):
+                solara.Markdown(f"**Event Date:** `{event_date}`")
+                solara.Markdown(f"**Return Period:** `{selected_return_period}`")
             
-            # Split view toggle
-            solara.Checkbox(
-                label="Enable Split View",
-                value=show_split_map,
-            )
+            solara.Markdown("---")
             
-            # Layer mode selection
+            solara.Markdown("### Display Mode")
+            
+            # Layer mode selection (Classification vs Uncertainty)
             solara.ToggleButtonsSingle(
                 value=map_layer_mode,
                 values=["Flood Classification", "Uncertainty"]
             )
             
-            # Uncertainty threshold slider (only visible in Uncertainty mode)
-            if layer_mode == "Uncertainty":
-                solara.Markdown("#### Confidence Filter")
-                solara.SliderFloat(
-                    label="Max Uncertainty",
-                    value=uncertainty_threshold,
-                    min=0.0,
-                    max=1.0,
-                    step=0.05
-                )
-                solara.Info(f"Showing ≤ {threshold:.2f}")
+            solara.Markdown("---")
+            
+            # Display legend based on mode
+            if layer_mode == "Flood Classification":
+                solara.Markdown("### Split View")
+                solara.Markdown("**Left:** Sentinel-2 Original Image")
+                solara.Markdown("**Right:** Flood Classification")
+                
+                solara.Markdown("### Classification Legend")
+                with solara.Card(elevation=0):
+                    solara.Markdown(
+                        "**Class Values** (Viridis colormap):\n\n"
+                        "- **0**: Invalid/No Data (Dark Purple)\n"
+                        "- **1**: Land (Purple-Blue)\n"
+                        "- **2**: Water (Green-Blue)\n"
+                        "- **3**: Cloud (Yellow-Green)\n"
+                        "- **4**: Flood Trace (Yellow)"
+                    )
+            else:  # Uncertainty mode
+                solara.Markdown("### Split View")
+                solara.Markdown("**Left:** Flood Classification")
+                solara.Markdown("**Right:** Uncertainty Map")
+                
+                solara.Markdown("### Uncertainty Legend")
+                with solara.Card(elevation=0):
+                    solara.Markdown(
+                        "**Color Scale:**\n\n"
+                        "- 🟢 **Green** = Low uncertainty (reliable)\n"
+                        "- 🟡 **Yellow** = Medium uncertainty\n"
+                        "- 🔴 **Red** = High uncertainty (unreliable)\n\n"
+                        "Values range from 0 (certain) to 1 (uncertain)"
+                    )
         
         # Display map
         solara.display(map_widget)

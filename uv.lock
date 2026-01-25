@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.13"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -877,7 +877,7 @@ requires-dist = [
     { name = "pyproj", specifier = ">=3.7.2" },
     { name = "rasterio", specifier = ">=1.5.0" },
     { name = "rioxarray", specifier = ">=0.20.0" },
-    { name = "solara", specifier = ">=1.56.0" },
+    { name = "solara", specifier = "==1.57.1" },
 ]
 
 [[package]]
@@ -3082,20 +3082,20 @@ wheels = [
 
 [[package]]
 name = "solara"
-version = "1.56.0"
+version = "1.57.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "solara-server", extra = ["dev", "starlette"] },
     { name = "solara-ui", extra = ["all"] },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f8/29/9f8253f971a118ea91f0b4fa4f2270a51b427fb362350def3831d9c49445/solara-1.56.0.tar.gz", hash = "sha256:56509be593c2b9095c3743cd7388fbebb3d41af5a3d00b78069119a532efcb9c", size = 5048, upload-time = "2025-12-22T20:32:42.565Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/0f/e1/f8f95dc9da57f51895dd6b8c4fc3a22f3731bad2a0b515867f1bcc5f773a/solara-1.57.1.tar.gz", hash = "sha256:5d09fafb8a89c372e8cafb47b393003f6e68f479fcbb90cc9b8b4e97f964701f", size = 5055, upload-time = "2026-01-21T13:03:48.15Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ed/c8/79f7c7a72a01064a17b7c3e812cd8a602423ada291d7010e5d37463e5a50/solara-1.56.0-py3-none-any.whl", hash = "sha256:8317cf7c70868e0f103f0964c8263c5ffbc7ce7bdd038bba8c5ed184986f214b", size = 5870, upload-time = "2025-12-22T20:32:41.494Z" },
+    { url = "https://files.pythonhosted.org/packages/ff/d1/369e6467aaed50d95bdfa5d2dc82911f2d951739e7aed16a6cde5ea9b0d9/solara-1.57.1-py3-none-any.whl", hash = "sha256:4a8f948861c940d7b528b265f68ac267653722ecfa957f821d6f53854031ca9c", size = 5870, upload-time = "2026-01-21T13:03:49.616Z" },
 ]
 
 [[package]]
 name = "solara-server"
-version = "1.56.0"
+version = "1.57.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -3107,9 +3107,9 @@ dependencies = [
     { name = "rich-click" },
     { name = "solara-ui" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e9/0d/53adcea6f6de3bf824b1b5b622ebd31d02012c81b204115e1e683ee9fa64/solara_server-1.56.0.tar.gz", hash = "sha256:75f123a44027a8eb322157ced0788ba54b4c09a840235f64ff7d25186dbcc549", size = 2575, upload-time = "2025-12-22T20:33:01.01Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/09/a1/9cdb224d9cd039361ef7bb31a9adda746b5ce02d209bdb29a6a0011209d2/solara_server-1.57.1.tar.gz", hash = "sha256:6901dd351f8aff1736a673779bc289c4ab45b241be0b24a1ba6202d53dfc8760", size = 2583, upload-time = "2026-01-21T13:04:05.564Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b1/81/bb409980f85f44498d06bd4f51c6e54ce376586453b6c320a8e533daeda6/solara_server-1.56.0-py3-none-any.whl", hash = "sha256:7259e577e7b613b1758d377510cdf02bee94ad514f1bcbb11394fbd30417f9de", size = 3926, upload-time = "2025-12-22T20:33:02.082Z" },
+    { url = "https://files.pythonhosted.org/packages/c3/75/8f33d8accf99828b402b97024f4bc8138baf30d60b54b7b907d9c671f6aa/solara_server-1.57.1-py3-none-any.whl", hash = "sha256:a9bfefbac1b5c9764e2d07ff148f12b9413b49208b5edee368b6c27c6f14cc27", size = 3925, upload-time = "2026-01-21T13:04:04.795Z" },
 ]
 
 [package.optional-dependencies]
@@ -3125,7 +3125,7 @@ starlette = [
 
 [[package]]
 name = "solara-ui"
-version = "1.56.0"
+version = "1.57.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "humanize" },
@@ -3135,9 +3135,9 @@ dependencies = [
     { name = "reacton" },
     { name = "requests" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/46/75/b08ed19d7f99df68d95b982f828c69f9587d5f798841eaaaa98b37ed3184/solara_ui-1.56.0.tar.gz", hash = "sha256:17476c38c7e785480354028dda315a83fbfe524a0bc695913f7e8df3bb3a5c51", size = 1260151, upload-time = "2025-12-22T20:32:57.653Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/21/cc/84f036b6f3aee92ce516d86e11641076e5f61f32ddd6e5a0e6abf860b234/solara_ui-1.57.1.tar.gz", hash = "sha256:ce4df6728cd3ff03f61669979d3c77db822b23f54e1abffb67d190132c14d9f2", size = 1262520, upload-time = "2026-01-21T13:04:03.507Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/13/2e/59fd8ed7bf7779e74a2620c0b4227aba1a114566422936b3e1c969aa2965/solara_ui-1.56.0-py3-none-any.whl", hash = "sha256:a0c6b066eb8e8c687c444c063d179d803540b6ba34b9b4cc12cddedd5e41a819", size = 1308338, upload-time = "2025-12-22T20:32:59.358Z" },
+    { url = "https://files.pythonhosted.org/packages/91/de/e72f7395d8c0720f236d762a1ecde1d13c6eb1f6d34141d8dfd0825cc193/solara_ui-1.57.1-py3-none-any.whl", hash = "sha256:91af6f5065911d9c41b92892e7a7ac0b7be219abd9de4ee140a5ed88922c9156", size = 1310531, upload-time = "2026-01-21T13:04:01.67Z" },
 ]
 
 [package.optional-dependencies]

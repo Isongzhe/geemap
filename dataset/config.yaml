@@ -1,8 +1,16 @@
+analog_df:
+  path: /home/NAS/homes/isaac-10009/Data/Sinotech_Hackathon/Glofas_analogue_results_hybas_si_lev08_3080576250_target_rp_100_df.csv
+  top_n: 10
 model:
-  input_path: /home/NAS/homes/cjchen-10025/data/worldfloods_v2/data/test/S2/EMSR342_07SOUTHNORMANTON_DEL_MONIT03_v2.tif
-  output_path: /home/NAS/homes/cjchen-10025/ML4FloodsUncertainty/result/val_test_inference/test/EDL/EMSR342_07SOUTHNORMANTON_DEL_MONIT03_v2_output_EDL.tif
-
-
+  event_date: 2024-04-13
+  input_folder: /home/NAS/homes/isaac-10009/Data/Sinotech_Hackathon/data/
+  output_folder: /home/NAS/homes/cjchen-10025/ML4FloodsUncertainty/result/hackathon_sinotech/EDL/
+return_period_ds:
+  intake_catalogs_path: /home/sungche/NAS/stac/wangup-stac-manager/config/catalogs/glofas_intake_catalog.yaml
+  source: glofas_return_periods
+  variable: T_2, T_5, T_10, T_20, T_50, T_100, T_200, T_500, T_1000
 watershed:
-  default_id: 5120274340
-  path: /home/NAS/homes/cjchen-10025/data/HydroBASINS/hybas_au_lev01-12_v1c/hybas_au_lev12_v1c.shp
+  default_id: 3080576250
+  level: 2
+  region: as
+  root_path: /home/sungche/NAS/dataset/hydro_basins
