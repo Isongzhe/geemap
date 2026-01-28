@@ -389,8 +389,8 @@ def Page():
     is_loading = loading.value
     error = error_message.value
     
-    # Debug: Print state snapshot on each render
-    Step1State.print()
+    # Debug: Print state snapshot on each render (disabled for performance)
+    # Step1State.print()
 
     # Determine if showing transition overlay
     show_transition = state.is_transitioning.value
@@ -548,9 +548,6 @@ def Page():
             m.clear_layers()
             m.add_basemap("OpenStreetMap")
 
-            m.center = map_center.value
-            m.zoom = map_zoom.value
-
             def make_click_handler(source_gdf):
                 def handler(event=None, feature=None, **kwargs):
                     if feature:
@@ -603,16 +600,27 @@ def Page():
 
             print(f"[DEBUG update_layers] Done")
 
+        # Update layers when zoom/data changes (not on pan)
         solara.use_effect(
             update_map_layers,
             dependencies=[
-                map_center.value,
-                map_zoom.value,
+                # map_center.value,  # Removed: panning doesn't need layer rebuild
+                map_zoom.value,      # Keep: zoom changes trigger level switch
                 show_global,
                 layer_ver,
                 id(global_gdf),
                 id(result_gdf),
             ]
+        )
+
+        # Update map view separately (efficient, no layer rebuild)
+        def update_map_view():
+            m.center = map_center.value
+            m.zoom = map_zoom.value
+
+        solara.use_effect(
+            update_map_view,
+            dependencies=[map_center.value, map_zoom.value]
         )
 
         solara.display(m)
