@@ -1,4 +1,4 @@
-"""
+ """
 Centralized configuration for the Geemap Flood Visualization Application.
 
 This module contains all application constants and provides functions
