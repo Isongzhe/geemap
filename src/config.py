@@ -12,7 +12,7 @@ import os
 # Application Info
 # =============================================================================
 
-APP_TITLE = "Flood Visualization"
+APP_TITLE = "Global Flood Visualization Platform"
 STEP1_TITLE = "Step 1: Watershed Explorer"
 STEP2_TITLE = "Step 2: Flood Visualization"
 STEP1_NAV_LABEL = "Watershed"

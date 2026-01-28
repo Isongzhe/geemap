@@ -171,11 +171,12 @@ def save_selected_watershed(hybas_id: int, region: str = None, level: int = None
 
 def get_available_regions() -> list:
     """Returns list of available region codes."""
-    return ['af', 'ar', 'as', 'au', 'eu', 'gr', 'na', 'sa', 'si']
+    return ['all', 'af', 'ar', 'as', 'au', 'eu', 'gr', 'na', 'sa', 'si']
 
 def get_region_display_name(region: str) -> str:
     """Returns human-readable name for region code."""
     names = {
+        'all': 'All Regions',
         'af': 'Africa',
         'ar': 'Arctic',
         'as': 'Asia',
@@ -187,6 +188,36 @@ def get_region_display_name(region: str) -> str:
         'si': 'Siberia',
     }
     return names.get(region, region)
+
+
+def load_all_regions_at_level(level: int) -> gpd.GeoDataFrame:
+    """
+    Load and combine all regions at a given level.
+
+    Args:
+        level: HydroBASINS level (1-12)
+
+    Returns:
+        Combined GeoDataFrame with all regions
+    """
+    # All actual region codes (not including 'all')
+    actual_regions = ['af', 'ar', 'as', 'au', 'eu', 'gr', 'na', 'sa', 'si']
+    gdfs = []
+
+    for region in actual_regions:
+        try:
+            gdf = load_watersheds(region, level)
+            gdf['region'] = region  # Add region column for reference
+            gdfs.append(gdf)
+        except Exception as e:
+            print(f"[WARNING] Could not load {region} level {level}: {e}")
+
+    if gdfs:
+        combined = gpd.pd.concat(gdfs, ignore_index=True)
+        print(f"[INFO] Combined {len(combined)} watersheds from {len(gdfs)} regions at level {level}")
+        return combined
+
+    return gpd.GeoDataFrame()
 
 def filter_nearby_watersheds(
     full_gdf: gpd.GeoDataFrame, 

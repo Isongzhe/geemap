@@ -3,7 +3,7 @@
 This document describes the data sources used in the project as defined in `config.yaml`.
 
 ## 1. Watershed Shapefile
-**Path**: `/home/NAS/homes/cjchen-10025/data/HydroBASINS/hybas_au_lev01-12_v1c/hybas_au_lev12_v1c.shp`
+**Path**: `/home/sungche/NAS/dataset/hydro_basins/hybas_au_lev01-12_v1c/hybas_au_lev12_v1c.shp`
 **Description**: Detailed watershed boundaries (HydroBASINS Level 12) for the Australia/Oceania region (implied by `au` code).
 **Metadata**:
 - **CRS**: EPSG:4326 (WGS 84)

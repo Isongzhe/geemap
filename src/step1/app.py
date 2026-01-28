@@ -21,8 +21,9 @@ from src.step1.utils import (
     save_selected_watershed,
     get_available_regions,
     get_region_display_name,
-    filter_nearby_watersheds,  # Spatial filtering to reduce frontend data
-    find_watersheds_by_coordinates,  # Search watersheds by lat/lon
+    filter_nearby_watersheds,
+    find_watersheds_by_coordinates,
+    load_all_regions_at_level,  # Load all regions at a given level
 )
 from src.config import (
     DEFAULT_CENTER,
@@ -37,26 +38,94 @@ import src.state as state
 # Reactive State (Local to Step 1)
 # ============================================================================
 
-selected_region = solara.reactive("as")  # Current region selection
 selected_level = solara.reactive(2)  # Current level selection (default: 2)
 selected_watershed_id = solara.reactive(None)  # Currently selected HYBAS_ID
 selected_watershed_info = solara.reactive(None)  # Dict with SUB_AREA, UP_AREA metadata
 watershed_result_gdf = solara.reactive(None)  # Single selected watershed GeoDataFrame
 watershed_context_gdf = solara.reactive(None)  # Nearby watersheds for context (optional)
-watershed_global_gdf = solara.reactive(None)  # Global watersheds for current region/level
-show_context_layer = solara.reactive(False)  # Whether to show nearby watersheds (default: off)
-show_global_layer = solara.reactive(False)  # Whether to show global region/level shp (default: OFF, user controls manually)
-
+watershed_global_gdf = solara.reactive(None)  # Global watersheds for current level
+show_context_layer = solara.reactive(False)  # Whether to show nearby watersheds
+show_global_layer = solara.reactive(True)  # Whether to show global watersheds (default: ON)
+layer_version = solara.reactive(0)  # Version counter to force layer refresh
 
 search_id_input = solara.reactive("")  # User input for HYBAS_ID search
-lat_input = solara.reactive("")  # Latitude input for coordinate navigation
-lon_input = solara.reactive("")  # Longitude input for coordinate navigation
+lat_input = solara.reactive("")  # Latitude input
+lon_input = solara.reactive("")  # Longitude input
 map_center = solara.reactive(list(DEFAULT_CENTER))  # Current map center [lat, lon]
 map_zoom = solara.reactive(DEFAULT_ZOOM)  # Current map zoom level
-error_message = solara.reactive("")  # Error message to display to user
+error_message = solara.reactive("")  # Error message to display
 loading = solara.reactive(False)  # Loading state indicator
-search_mode = solara.reactive("Coordinates")  # Search mode: "Coordinates" or "HYBAS ID" (default: Coordinates)
-selected_return_period = solara.reactive("T_200")  # Selected return period (default: T_200, only T_200+ available)
+search_mode = solara.reactive("HYBAS ID")  # Search mode: "Coordinates" or "HYBAS ID"
+selected_return_period = solara.reactive("T_200")  # Selected return period
+
+
+# ============================================================================
+# State Snapshot - For debugging and inspection
+# ============================================================================
+
+class Step1State:
+    """Snapshot of all Step 1 reactive state values for easy inspection."""
+
+    @staticmethod
+    def get():
+        """Get current state snapshot as a dict."""
+        return {
+            # Selection
+            "level": selected_level.value,
+            "watershed_id": selected_watershed_id.value,
+            "watershed_info": selected_watershed_info.value,
+            "return_period": selected_return_period.value,
+
+            # Map
+            "map_center": map_center.value,
+            "map_zoom": map_zoom.value,
+
+            # Layers
+            "show_global": show_global_layer.value,
+            "show_context": show_context_layer.value,
+            "layer_version": layer_version.value,
+            "global_gdf_count": len(watershed_global_gdf.value) if watershed_global_gdf.value is not None else 0,
+            "context_gdf_count": len(watershed_context_gdf.value) if watershed_context_gdf.value is not None else 0,
+            "result_gdf_count": len(watershed_result_gdf.value) if watershed_result_gdf.value is not None else 0,
+
+            # Search
+            "search_mode": search_mode.value,
+            "search_id": search_id_input.value,
+            "lat": lat_input.value,
+            "lon": lon_input.value,
+
+            # UI
+            "loading": loading.value,
+            "error": error_message.value,
+        }
+
+    @staticmethod
+    def print():
+        """Print current state in a readable format."""
+        state = Step1State.get()
+        print("\n" + "=" * 50)
+        print("STEP 1 STATE SNAPSHOT")
+        print("=" * 50)
+        print(f"Level: {state['level']}")
+        print(f"Watershed ID: {state['watershed_id']}")
+        print(f"Return Period: {state['return_period']}")
+        print(f"Map Center: {state['map_center']}")
+        print(f"Map Zoom: {state['map_zoom']}")
+        print("-" * 50)
+        print(f"Show Global: {state['show_global']} ({state['global_gdf_count']} features)")
+        print(f"Show Context: {state['show_context']} ({state['context_gdf_count']} features)")
+        print(f"Selected: {state['result_gdf_count']} features")
+        print(f"Layer Version: {state['layer_version']}")
+        print("-" * 50)
+        print(f"Search Mode: {state['search_mode']}")
+        print(f"Loading: {state['loading']}")
+        print(f"Error: {state['error'] or 'None'}")
+        print("=" * 50 + "\n")
+        return state
+
+
+# Export for external access
+step1_state = Step1State()
 
 
 # ==================== Initialization ====================
@@ -73,11 +142,9 @@ def load_initial_data():
     ws_config = config.get("watershed", {})
 
     # Set initial values from config to pre-fill UI
-    region = ws_config.get("region", "as")
     level = ws_config.get("level", 2)
     default_id = ws_config.get("default_id")
 
-    selected_region.set(region)
     selected_level.set(level)
 
     if default_id:
@@ -86,57 +153,30 @@ def load_initial_data():
 
 def load_global_watershed_data():
     """
-    Load watershed shapefile based on current settings.
-    
-    Behavior:
-    - If user has moved map from default position (coordinates search): load ±5° buffer around map center
-    - Otherwise: load entire region/level shapefile
+    Load all regions at the selected level.
     """
     if not show_global_layer.value:
-        # User unchecked, clear the global layer
         watershed_global_gdf.set(None)
+        layer_version.set(layer_version.value + 1)
         return
-    
+
     loading.set(True)
     error_message.set("")
-    
+
     try:
-        center = map_center.value
-        # Check if user has moved map from default position (coordinates search)
-        is_custom_location = center != list(DEFAULT_CENTER)
-        
-        print(f"[DEBUG load_global] map_center: {center}, DEFAULT_CENTER: {list(DEFAULT_CENTER)}")
-        print(f"[DEBUG load_global] is_custom_location: {is_custom_location}")
-        print(f"[DEBUG load_global] selected_region: {selected_region.value}, selected_level: {selected_level.value}")
-        
-        if is_custom_location:
-            # Load ±5° buffer around current map center
-            lat, lon = center
-            print(f"[DEBUG load_global] Loading ±5° around ({lat}, {lon})")
-            filtered_gdf = find_watersheds_by_coordinates(
-                selected_region.value,
-                selected_level.value,
-                lat,
-                lon,
-                buffer_degrees=5.0
-            )
-            watershed_global_gdf.set(filtered_gdf)
-            
-            if filtered_gdf.empty:
-                error_message.set(f"No watersheds found near ({lat:.2f}, {lon:.2f})")
-            else:
-                error_message.set(f"Loaded {len(filtered_gdf)} watersheds around map center")
-        else:
-            # Load entire region/level
-            print(f"[DEBUG load_global] Loading entire region/level")
-            gdf = load_watersheds(selected_region.value, selected_level.value)
-            watershed_global_gdf.set(gdf)
-            error_message.set("")
-            
+        level = selected_level.value
+        print(f"[DEBUG load_global] Loading ALL regions at level {level}")
+
+        gdf = load_all_regions_at_level(level)
+        watershed_global_gdf.set(gdf)
+        error_message.set(f"Loaded {len(gdf)} watersheds")
+
+        layer_version.set(layer_version.value + 1)
+
     except Exception as e:
         error_message.set(f"Error loading data: {str(e)}")
         watershed_global_gdf.set(None)
-        show_global_layer.set(False)  # Auto-uncheck on error
+        show_global_layer.set(False)
     finally:
         loading.set(False)
 
@@ -222,7 +262,6 @@ def handle_hybas_id_search():
 
     if result_gdf is not None and not result_gdf.empty:
         # Update state to match the found watershed
-        selected_region.set(region)
         selected_level.set(level)
         selected_watershed_id.set(hybas_id)
 
@@ -301,8 +340,8 @@ def handle_submit():
     state.selected_watershed_id.set(current_id)
     state.selected_return_period.set(selected_return_period.value)
     
-    # Save watershed info to config
-    save_selected_watershed(current_id, selected_region.value, selected_level.value)
+    # Save watershed info to config (region is auto-detected from ID)
+    save_selected_watershed(current_id, level=selected_level.value)
     
     print(f"[STEP1] Submit: Watershed={current_id}, Return Period={selected_return_period.value}")
     
@@ -327,10 +366,10 @@ def Page():
     # Watersheds are now loaded only when user searches by HYBAS_ID
     # This prevents WebSocket from being overwhelmed by thousands of polygons
 
-    # Auto-load global shp when checkbox state or settings change
+    # Auto-load all regions when checkbox state or level changes
     solara.use_effect(
-        load_global_watershed_data, 
-        [show_global_layer.value, selected_region.value, selected_level.value, map_center.value]
+        load_global_watershed_data,
+        [show_global_layer.value, selected_level.value]
     )
 
     # Get current state values (these will update when reactive state changes)
@@ -340,27 +379,13 @@ def Page():
     global_gdf = watershed_global_gdf.value  # Global region/level shp
     show_context = show_context_layer.value  # Whether to show context layer
     show_global = show_global_layer.value  # Whether to show global layer
+    layer_ver = layer_version.value  # Version counter for forcing updates
     info = selected_watershed_info.value
     is_loading = loading.value
     error = error_message.value
     
-    # Debug: Print all reactive state values on each render
-    print(f"\n{'='*60}")
-    print(f"[DEBUG Page render] Reactive State:")
-    print(f"  - selected_region: {selected_region.value}")
-    print(f"  - selected_level: {selected_level.value}")
-    print(f"  - map_center: {map_center.value}")
-    print(f"  - map_zoom: {map_zoom.value}")
-    print(f"  - search_mode: {search_mode.value}")
-    print(f"  - selected_watershed_id: {current_id}")
-    print(f"  - show_context_layer: {show_context}")
-    print(f"  - show_global_layer: {show_global}")
-    print(f"  - result_gdf: {result_gdf is not None and not result_gdf.empty if result_gdf is not None else None}")
-    print(f"  - context_gdf: {len(context_gdf) if context_gdf is not None else None}")
-    print(f"  - global_gdf: {len(global_gdf) if global_gdf is not None else None}")
-    print(f"  - is_loading: {is_loading}")
-    print(f"  - error: {error[:50] if error else None}")
-    print(f"{'='*60}\n")
+    # Debug: Print state snapshot on each render
+    Step1State.print()
 
     with solara.Column(style={"height": "100vh"}):
         solara.Title(STEP1_TITLE)
@@ -368,40 +393,8 @@ def Page():
         with solara.Sidebar():
             solara.Markdown("## Watershed Explorer")
 
-            # Region & Level Selection
-            with solara.Card("Region & Level", elevation=0, style={"margin-bottom": "1rem"}):
-                solara.Markdown("_Settings for search and display_")
-                
-                regions = get_available_regions()
-                regions_name = [get_region_display_name(region) for region in regions]
-                
-                # solara.Select(
-                #     label="Region",
-                #     value=selected_region.value,
-                #     values=regions_name.value,
-                #     on_value=selected_region.set,
-                # )
-
-                # solara.Select(
-                #     label="Level",
-                #     value=selected_level.value,
-                #     values=list(range(1, 13)),  # 1 to 12
-                #     on_value=selected_level.set,
-                # )
-                
-                # Option to load shp - behavior depends on map position
-                solara.Checkbox(
-                    label=f"Load Watersheds Boundaries ({selected_region.value.upper()} Lv{selected_level.value})",
-                    value=show_global,
-                    on_value=show_global_layer.set,
-                    disabled=is_loading,
-                )
-                if map_center.value != list(DEFAULT_CENTER):
-                    solara.Info("Will load ±5° around map center", dense=True)
-
             # Return Period Selection
-            with solara.Car
-            ("Return Period", elevation=0, style={"margin-bottom": "1rem"}):
+            with solara.Card("Return Period", elevation=0, style={"margin-bottom": "1rem"}):
                 solara.Markdown("_Select flood return period for analysis_")
                 
                 # Get return period options from config
@@ -470,17 +463,24 @@ def Page():
                     # Format area values
                     sub_area = f"{info['SUB_AREA']:,.2f}" if isinstance(info['SUB_AREA'], (int, float)) else str(info['SUB_AREA'])
                     up_area = f"{info['UP_AREA']:,.2f}" if isinstance(info['UP_AREA'], (int, float)) else str(info['UP_AREA'])
-                    
-                    # Use Info component for better styling
+
                     solara.Info(f"**ID:** `{info['HYBAS_ID']}`", dense=True)
-                    solara.Markdown(f" **Sub Area:** {sub_area} km²")
-                    solara.Markdown(f" **Upstream Area:** {up_area} km²")
-                    
-                    # Option to show nearby watersheds for context
+                    solara.Markdown(f"**Sub Area:** {sub_area} km²")
+                    solara.Markdown(f"**Upstream Area:** {up_area} km²")
+
                     solara.Checkbox(
                         label="Show Nearby Watersheds",
                         value=show_context,
                         on_value=show_context_layer.set,
+                    )
+
+                    # Submit Button (at end of card)
+                    solara.Button(
+                        "Submit & Continue to Step 2",
+                        on_click=handle_submit,
+                        color="primary",
+                        block=True,
+                        style={"margin-top": "1rem"},
                     )
                 else:
                     solara.Text("Click a watershed or search by ID")
@@ -488,14 +488,6 @@ def Page():
             # Error Display
             if error:
                 solara.Error(error)
-
-            # Submit Button
-            solara.Button(
-                "Submit & Continue to Step 2",
-                on_click=handle_submit,
-                disabled=current_id is None,
-                color="primary",
-            )
 
             if is_loading:
                 solara.ProgressLinear(True)
@@ -512,6 +504,12 @@ def Page():
                 data_ctrl=False,
                 search_control=False,
                 layers_control=True,
+                height="800px",
+                max_zoom=15,
+                scale_ctrl=True,
+                zoom_ctrl=True,
+                measure_ctrl=True,
+                
             )
         
         m = solara.use_memo(create_map, dependencies=[])
@@ -570,7 +568,7 @@ def Page():
                     data=global_gdf.__geo_interface__,
                     style=style_global,
                     hover_style={'fillOpacity': 0.35},
-                    name=f"{selected_region.value.upper()} Level {selected_level.value} ShP"
+                    name=f"All Regions Level {selected_level.value}"
                 )
                 json_global.on_click(make_click_handler(global_gdf))
                 m.add_layer(json_global)
@@ -614,9 +612,10 @@ def Page():
                 map_zoom.value,
                 show_global,
                 show_context,
-                global_gdf,
-                context_gdf,
-                result_gdf,
+                layer_ver,  # Force refresh when version changes
+                id(global_gdf),  # Use id() to detect GeoDataFrame changes
+                id(context_gdf),
+                id(result_gdf),
             ]
         )
 
