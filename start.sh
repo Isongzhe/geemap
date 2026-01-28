@@ -2,7 +2,7 @@
 SESSION="geemap"
 
 echo "Cleaning up..."
-PORTS="8765 9100 9101"
+PORTS="8765 9100 9101 9102"
 for port in $PORTS; do
     echo "   Stopping process on port $port..."
     fuser -k -n tcp $port 2>/dev/null

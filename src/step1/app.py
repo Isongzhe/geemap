@@ -50,6 +50,7 @@ lon_input = solara.reactive("")  # Longitude input
 map_center = solara.reactive(list(DEFAULT_CENTER))  # Current map center [lat, lon]
 map_zoom = solara.reactive(DEFAULT_ZOOM)  # Current map zoom level
 error_message = solara.reactive("")  # Error message to display
+success_message = solara.reactive("")
 loading = solara.reactive(False)  # Loading state indicator
 search_mode = solara.reactive("HYBAS ID")  # Search mode: "Coordinates" or "HYBAS ID"
 selected_return_period = solara.reactive("T_200")  # Selected return period
@@ -91,6 +92,7 @@ class Step1State:
             # UI
             "loading": loading.value,
             "error": error_message.value,
+            "success": success_message.value,
         }
 
     @staticmethod
@@ -125,17 +127,18 @@ step1_state = Step1State()
 
 def load_initial_data():
     """
-    Load initial config values and pre-fill UI fields.
-    This runs once when the page loads (via solara.use_memo).
-    
-    NOTE: This only pre-fills the Region and Level selectors,
-    it does NOT load any watershed data to avoid initial lag.
+    Load initial config values for Clean Start workflow.
+
+    Clean Start Strategy:
+    - NO pre-loading of any watershed data (prevents startup freeze)
+    - Map starts at DEFAULT_CENTER (global view)
+    - User manually navigates and clicks "Load Watersheds in View"
     """
     config = load_config()
     ws_config = config.get("watershed", {})
 
-    # Set initial values from config to pre-fill UI
-    level = ws_config.get("level", 2)
+    # Set initial values from config (for reference only)
+    level = ws_config.get("level", 8)
     default_id = ws_config.get("default_id")
 
     selected_level.set(level)
@@ -143,22 +146,30 @@ def load_initial_data():
     if default_id:
         selected_watershed_id.set(default_id)
 
+    print("[DEBUG] Clean Start: No pre-loading. Map ready for manual navigation.")
+
 
 def load_viewport_watersheds():
     """
-    Load watersheds in current viewport based on zoom level.
-    Replaces load_global_watershed_data().
+    Manual button-triggered viewport loading with zoom guard.
+
+    Workflow:
+    1. User navigates to target location
+    2. User zooms in to at least level 8
+    3. User clicks "Load Watersheds in View" button
+    4. System loads only visible watersheds via bbox filtering
     """
-    if not show_global_layer.value:
-        watershed_global_gdf.set(None)
-        layer_version.set(layer_version.value + 1)
+    # Zoom Guard: Require minimum zoom to prevent loading too many features
+    zoom = map_zoom.value
+    if zoom < 8:
+        error_message.set("⚠️ Zoom in to level 8+ to load watershed details")
+        loading.set(False)
         return
 
     loading.set(True)
     error_message.set("")
 
     center_lat, center_lon = map_center.value
-    zoom = map_zoom.value
 
     print(f"[DEBUG app] Loading viewport: center=({center_lat:.2f},{center_lon:.2f}), zoom={zoom}")
 
@@ -171,11 +182,20 @@ def load_viewport_watersheds():
 
     if len(gdf) > 0:
         watershed_global_gdf.set(gdf)
+        show_global_layer.set(True)  # Enable layer display
         level = get_level_for_zoom(zoom)
-        error_message.set(f"Loaded {len(gdf)} watersheds (level {level})")
+
+        # Import here to avoid circular dependency
+        from src.step1.utils import find_region_for_point
+        regions = find_region_for_point(center_lon, center_lat)
+        region_str = ','.join(regions) if regions else 'ocean'
+
+        success_message.set(f"Loaded {len(gdf)} watersheds (level {level}, region={region_str})")
+        error_message.set("")
     else:
         watershed_global_gdf.set(None)
-        error_message.set("No watersheds in viewport")
+        error_message.set("No watersheds found in viewport")
+        success_message.set("")
 
     layer_version.set(layer_version.value + 1)
     loading.set(False)
@@ -197,6 +217,7 @@ def handle_coordinates_search():
     
     if not lat_text or not lon_text:
         error_message.set("Please enter both latitude and longitude")
+        success_message.set("")
         return
     
     try:
@@ -204,25 +225,25 @@ def handle_coordinates_search():
         lon = float(lon_text)
     except ValueError:
         error_message.set("Invalid coordinate format")
+        success_message.set("")
         return
     
     # Validate coordinate range
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         error_message.set("Coordinates out of range")
+        success_message.set("")
         return
     
     print(f"[DEBUG coordinates_search] Setting map_center to [{lat}, {lon}]")
     print(f"[DEBUG coordinates_search] Before: map_center.value = {map_center.value}")
 
-    # Move map to the coordinates
+    # Move map to the coordinates (Clean Start: NO auto-loading)
     map_center.set([lat, lon])
-    map_zoom.set(8)
-
-    # Auto-enable watershed layer to show nearby watersheds
-    show_global_layer.set(True)
+    map_zoom.set(10)  # Zoom 10 → Level 8 (for demo watershed 3080576250)
 
     print(f"[DEBUG coordinates_search] After: map_center.value = {map_center.value}")
-    error_message.set(f"Map centered at ({lat:.2f}, {lon:.2f}). Loading watersheds...")
+    success_message.set(f"Map centered at ({lat:.2f}, {lon:.2f}). Click 'Load Watersheds in View' to load data.")
+    error_message.set("")
 
 
 def handle_search():
@@ -281,9 +302,11 @@ def handle_hybas_id_search():
 
         map_center.set([center_lat, center_lon])
         map_zoom.set(zoom)
-        error_message.set(f"Found watershed {hybas_id}")
+        success_message.set(f"Found watershed {hybas_id}")
+        error_message.set("")
     else:
         error_message.set(f"Watershed {hybas_id} not found")
+        success_message.set("")
 
     loading.set(False)
 
@@ -373,12 +396,8 @@ def Page():
     # solara.use_memo ensures this runs exactly once, not on every re-render
     solara.use_memo(load_initial_data, dependencies=[])
 
-    # Load viewport watersheds only when show_global_layer changes
-    # (not on zoom changes - user must click "Load Watersheds in View" button)
-    solara.use_effect(
-        load_viewport_watersheds,
-        [show_global_layer.value]  # Removed map_zoom.value
-    )
+    # Manual Loading: Watershed loading is triggered ONLY by button click
+    # (removed auto-reload effect for Clean Start workflow)
 
     # Get current state values (these will update when reactive state changes)
     current_id = selected_watershed_id.value
@@ -468,17 +487,12 @@ def Page():
 
             # Map Layers Control
             with solara.Card("Map Layers", elevation=0, style={"margin-bottom": "1rem"}):
-                def reload_watersheds():
-                    """Reload watersheds in current viewport."""
-                    show_global_layer.set(True)
-                    layer_version.set(layer_version.value + 1)
-                    print(f"[DEBUG] Reload watersheds triggered at zoom {map_zoom.value}")
-
                 solara.Button(
                     "Load Watersheds in View",
-                    on_click=reload_watersheds,
+                    on_click=load_viewport_watersheds,  # Directly call the function (includes zoom guard)
                     block=True,
                     color="primary",
+                    disabled=is_loading,
                     style={"margin-bottom": "0.5rem"}
                 )
 
@@ -507,9 +521,10 @@ def Page():
                 else:
                     solara.Text("Search or click a watershed to select")
 
-            # Error Display
             if error:
-                solara.Error(error)
+                solara.Error(error, icon=True)
+            elif success_message.value: 
+                solara.Success(success_message.value, icon=True)
 
             if is_loading:
                 solara.ProgressLinear(True)

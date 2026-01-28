@@ -21,11 +21,12 @@ STEP2_NAV_LABEL = "Visualization"
 # =============================================================================
 # Port Configuration
 # =============================================================================
-# SSH forwarding: ssh -L 8765:localhost:8765 -L 9100:localhost:9100 -L 9101:localhost:9101 user@server
+# SSH forwarding: ssh -L 8765:localhost:8765 -L 9100:localhost:9100 -L 9101:localhost:9101 -L 9102:localhost:9102 user@server
 
 SOLARA_PORT = 8765
 INPUT_TILE_PORT = 9100
 OUTPUT_TILE_PORT = 9101
+PERMANENT_WATER_PORT = 9102
 
 # =============================================================================
 # Map Defaults

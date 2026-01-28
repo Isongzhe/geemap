@@ -44,18 +44,25 @@ Solara App (src/main.py)
 
 ### Two-Step Workflow
 
-**Step 1: Watershed Selection** (`src/step1/`)
-- Interactive map displaying Sentinel-2 footprint and HydroBASINS watersheds
-- User selects watershed by clicking on map or dropdown
-- Selection is persisted to `dataset/config.yaml`
+**Step 1: Watershed Selection** (`src/step1/`) - **Clean Start Workflow**
+- Map starts with **empty global view** (no pre-loaded data to avoid freeze)
+- User manually navigates via coordinate input or HYBAS_ID search
+- User clicks **"Load Watersheds in View"** button to load viewport data
+- Zoom guard: Requires zoom ≥ 8 to prevent loading too many features
+- BBox partial reading: Only loads watersheds in viewport (90%+ RAM reduction)
+- Auto-level selection: Zoom 10 → Level 8 (for demo watershed 3080576250)
+- User clicks watershed to select, then submits to Step 2
 
-**Step 2: Flood Visualization** (`src/step2/`)
-- Displays three data layers using COG files:
-  - Input (Sentinel-2 from `input_path`)
-  - Flood Classification (from `output_path` band 1)
-  - Uncertainty (from `output_path` band 2)
-- Split-view comparison mode
-- Confidence slider to filter uncertainty visualization
+**Step 2: Flood Analytics Dashboard** (`src/step2/`)
+- **Multi-Event Selection**: Load and switch between analog flood events from CSV catalog
+- **Permanent Water Overlay**: Blue semi-transparent layer showing baseline water boundaries
+- Displays data layers using COG files:
+  - Input (Sentinel-2 from `input_folder`, strict S2 requirement)
+  - Flood Classification (from `output_folder` band 1)
+  - Uncertainty (from `output_folder` band 2)
+  - Permanent Water (from `permanent_water_path`, static overlay)
+- Split-view comparison mode with permanent water overlay in Classification mode
+- **Analytics Panel**: Event table and similarity score distribution chart with highlighted selection
 
 ### Data Flow
 
@@ -92,9 +99,10 @@ When running on remote server (e.g., NAS via SSH), forward these ports:
 - **8765**: Solara Web Interface
 - **9100**: TileServer for Input (Sentinel-2)
 - **9101**: TileServer for Output (Model predictions)
+- **9102**: TileServer for Permanent Water (static overlay)
 
 ```bash
-ssh -L 8765:localhost:8765 -L 9100:localhost:9100 -L 9101:localhost:9101 user@remote-server
+ssh -L 8765:localhost:8765 -L 9100:localhost:9100 -L 9101:localhost:9101 -L 9102:localhost:9102 user@remote-server
 ```
 
 ### Development Commands
@@ -113,8 +121,12 @@ uv run solara run src/step2/app.py
 ### Configuration
 
 **`dataset/config.yaml`**: Central configuration for data paths and watershed selection
-- `model.input_path`: Sentinel-2 COG file path
-- `model.output_path`: Flood model output COG file path (2 bands: classification, uncertainty)
+- `analog_df.path`: CSV file path for analog event catalog (columns: rank, method, datetime, score)
+- `analog_df.top_n`: Number of top-ranked events to load (default: 10)
+- `model.event_date`: Fallback event date if analog catalog is not available
+- `model.input_folder`: Folder containing Sentinel-2 COG files (strict S2 requirement)
+- `model.output_folder`: Folder containing flood model output COG files (2 bands: classification, uncertainty)
+- `model.permanent_water_path`: Permanent water COG file path (static overlay)
 - `watershed.path`: HydroBASINS shapefile path
 - `watershed.default_id`: Currently selected watershed ID
 
@@ -125,7 +137,7 @@ uv run solara run src/step2/app.py
 
 **Step-specific reactive state** (defined in each `app.py`):
 - Step 1: `selected_watershed_id`, `candidates_gdf`, `map_center`
-- Step 2: `uncertainty_threshold`, `show_split_map`, `map_layer_mode`
+- Step 2: `map_layer_mode`, `analog_events_df`, `selected_event_date`, `selected_event_metadata`, `preview_image_path`, `permanent_water_path`
 
 ### Core Components
 
@@ -141,9 +153,22 @@ uv run solara run src/step2/app.py
 - `get_candidate_watersheds()`: Finds watersheds intersecting with image bounds
 - `save_selected_watershed()`: Updates config.yaml with selected ID
 
-**`src/step2/app.py`**: Flood visualization UI
-- **Key Function**: `get_tile_client(path, band=None)` - Creates TileClient for COG file
-- Uses `localtileserver.get_leaflet_tile_layer()` to create map layers
+**`src/step2/app.py`**: Flood analytics dashboard
+- **Multi-Event System**: Loads analog catalog from CSV, provides event dropdown selector
+- **Permanent Water**: Creates static TileClient for permanent water overlay (port 9102)
+- **Dynamic Loading**: Recreates input/output TileClients when event changes
+- **Analytics Panel**: DataFrame table + matplotlib box/strip plot with red star for selected event
+- **Key Functions**:
+  - `_create_permanent_water_client()` - Static water TileClient (singleton)
+  - `_create_tile_clients_for_event()` - Dynamic event-based TileClients
+  - `create_score_chart()` - Matplotlib chart with box plot + strip plot + highlighted selection
+- Uses `localtileserver.get_leaflet_tile_layer()` to create map layers with permanent water overlay
+
+**`src/step2/utils.py`**: Event discovery and catalog utilities
+- `find_event_input()` - **Strict S2 requirement**: Only matches `S2_{date}*.tif` (no Landsat fallback)
+- `find_event_output()` - Wildcard prefix: Matches `*{date}*_EDL.tif` (supports S2/LS)
+- `find_event_preview()` - Finds PNG preview: `*{date}*_EDL_prediction.png`
+- `load_analog_catalog()` - Loads CSV with columns: rank, method, datetime, score
 - Supports three layer modes:
   - Input (Sentinel-2 RGB)
   - Classification (OUTPUT_PATH band 1, with colormap)
@@ -234,6 +259,47 @@ localtileserver supports matplotlib colormaps:
 
 ## Troubleshooting
 
+### Analog Catalog Issues
+
+**Error**: "Analog catalog CSV not found"
+- **Solution**: Verify `analog_df.path` in config.yaml exists
+  ```bash
+  ls -lh /path/to/analog_catalog.csv
+  ```
+
+**Error**: "CSV missing required columns"
+- **Solution**: Ensure CSV has columns: `rank`, `datetime`, `score`
+  ```bash
+  head -5 /path/to/analog_catalog.csv
+  ```
+
+**Behavior**: Falls back to single event mode
+- **Cause**: CSV not configured or loading failed
+- **Expected**: App uses `model.event_date` as fallback
+
+### Permanent Water Overlay Issues
+
+**Problem**: Blue water overlay not visible
+- **Check**: Verify `model.permanent_water_path` in config.yaml
+- **Check**: Ensure file exists and is valid COG
+  ```bash
+  uv run rio cogeo validate /path/to/permanent_water.tif
+  ```
+- **Check**: Only visible in "Flood Classification" mode (not Uncertainty mode)
+
+**Problem**: Port 9102 conflict
+- **Solution**: Kill existing process or change `PERMANENT_WATER_PORT` in `src/config.py`
+
+### Event Selection Issues
+
+**Problem**: No preview images shown
+- **Cause**: PNG files not found matching pattern `*{date}*_EDL_prediction.png`
+- **Expected Behavior**: Shows "Preview not available" placeholder
+
+**Problem**: Cannot load files for some events
+- **Cause**: Missing S2 input files (strict requirement)
+- **Solution**: Ensure all events in CSV have corresponding `S2_{date}*.tif` files
+
 ### Tiles Not Loading
 
 1. **Check COG format**: Ensure files are valid COG
@@ -244,7 +310,7 @@ localtileserver supports matplotlib colormaps:
 2. **Check file paths**: Verify config.yaml paths are correct and files exist
    ```bash
    cat dataset/config.yaml
-   ls -lh /path/to/input.tif
+   ls -lh /path/to/input_folder/
    ```
 
 3. **Check logs**: View tmux logs for errors
@@ -252,7 +318,7 @@ localtileserver supports matplotlib colormaps:
    tmux attach -t geemap
    ```
 
-4. **Verify port forwarding**: If on remote server, ensure port 8765 is forwarded
+4. **Verify port forwarding**: If on remote server, ensure ports 8765, 9100, 9101, 9102 are forwarded
 
 ### TileClient Errors
 

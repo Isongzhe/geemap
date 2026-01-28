@@ -5,12 +5,13 @@ model:
   event_date: 2024-04-13
   input_folder: /home/NAS/homes/isaac-10009/Data/Sinotech_Hackathon/data/
   output_folder: /home/NAS/homes/cjchen-10025/ML4FloodsUncertainty/result/hackathon_sinotech/EDL/
+  permanent_water_path: /home/NAS/homes/isaac-10009/Data/Sinotech_Hackathon/data/permanent_water_binary_LL_68.97_54.85_UR_69.17_55.02.tif
 return_period_ds:
   intake_catalogs_path: /home/sungche/NAS/stac/wangup-stac-manager/config/catalogs/glofas_intake_catalog.yaml
   source: glofas_return_periods
   variable: T_2, T_5, T_10, T_20, T_50, T_100, T_200, T_500, T_1000
 watershed:
   default_id: 3080576250
-  level: 2
+  level: 8
   region: as
   root_path: /home/sungche/NAS/dataset/hydro_basins
