@@ -113,7 +113,10 @@ WATERSHED_ID = WATERSHED_CFG.get("default_id")
 # Reactive State
 # ============================================================================
 
-map_layer_mode = solara.reactive("Flood Classification")  # "Flood Classification" or "Uncertainty" 
+map_layer_mode = solara.reactive("Flood Classification")  # "Flood Classification" or "Uncertainty"
+
+# Watershed layer reload trigger
+watershed_layer_version = solara.reactive(0) 
 
 # ============================================================================
 # Helper Functions
@@ -287,10 +290,14 @@ def Page():
     # Create tile clients (memoized)
     tile_clients = solara.use_memo(_create_tile_clients, dependencies=[])
 
-    # Create watershed layer (memoized, updates when global state changes)
+    # Create watershed layer (memoized, updates when global state changes or manual reload)
     watershed_layer = solara.use_memo(
         _create_watershed_layer,
-        dependencies=[state.selected_watershed_geojson.value, state.selected_watershed_id.value]
+        dependencies=[
+            state.selected_watershed_geojson.value,
+            state.selected_watershed_id.value,
+            watershed_layer_version.value
+        ]
     )
     
     def update_layers():
@@ -409,7 +416,23 @@ def Page():
                 solara.Markdown(f"**Return Period:** `{selected_return_period}`")
             
             solara.Markdown("---")
-            
+
+            # Watershed boundary reload button
+            solara.Markdown("### Watershed Boundary")
+            def reload_watershed():
+                watershed_layer_version.set(watershed_layer_version.value + 1)
+                print(f"[STEP2] Watershed layer reloaded (version {watershed_layer_version.value})")
+
+            solara.Button(
+                "Reload Watershed Boundary",
+                on_click=reload_watershed,
+                block=True,
+                color="primary",
+                style={"margin-bottom": "1rem"}
+            )
+
+            solara.Markdown("---")
+
             solara.Markdown("### Display Mode")
             
             # Layer mode selection (Classification vs Uncertainty)
