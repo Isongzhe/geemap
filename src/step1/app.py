@@ -213,13 +213,16 @@ def handle_coordinates_search():
     
     print(f"[DEBUG coordinates_search] Setting map_center to [{lat}, {lon}]")
     print(f"[DEBUG coordinates_search] Before: map_center.value = {map_center.value}")
-    
-    # Simply move map to the coordinates
+
+    # Move map to the coordinates
     map_center.set([lat, lon])
     map_zoom.set(8)
-    
+
+    # Auto-enable watershed layer to show nearby watersheds
+    show_global_layer.set(True)
+
     print(f"[DEBUG coordinates_search] After: map_center.value = {map_center.value}")
-    error_message.set(f"Map centered at ({lat:.2f}, {lon:.2f}). Enable 'Load shp' to show watersheds.")
+    error_message.set(f"Map centered at ({lat:.2f}, {lon:.2f}). Loading watersheds...")
 
 
 def handle_search():
@@ -461,6 +464,27 @@ def Page():
                     color="primary",
                 )
 
+
+            # Map Layers Control
+            with solara.Card("Map Layers", elevation=0, style={"margin-bottom": "1rem"}):
+                def reload_watersheds():
+                    """Reload watersheds in current viewport."""
+                    show_global_layer.set(True)
+                    layer_version.set(layer_version.value + 1)
+                    print(f"[DEBUG] Reload watersheds triggered at zoom {map_zoom.value}")
+
+                solara.Button(
+                    "Load Watersheds in View",
+                    on_click=reload_watersheds,
+                    block=True,
+                    color="primary",
+                    style={"margin-bottom": "0.5rem"}
+                )
+
+                if show_global_layer.value and global_gdf is not None:
+                    count = len(global_gdf)
+                    level = get_level_for_zoom(map_zoom.value)
+                    solara.Info(f"Showing {count} watersheds (level {level})", dense=True)
 
             # Watershed Info Panel
             with solara.Card("Selected Watershed", elevation=0, style={"margin-bottom": "1rem"}):
