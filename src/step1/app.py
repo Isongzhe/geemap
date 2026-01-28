@@ -322,18 +322,39 @@ def handle_submit():
     if current_id is None:
         error_message.set("Please select a watershed first")
         return
-    
+
+    result_gdf = watershed_result_gdf.value
+    if result_gdf is None or result_gdf.empty:
+        error_message.set("No watershed geometry available")
+        return
+
     # Save to global state (shared across steps)
     state.selected_watershed_id.set(current_id)
     state.selected_return_period.set(selected_return_period.value)
-    
-    # Save watershed info to config (region is auto-detected from ID)
+
+    # Convert GeoDataFrame to GeoJSON for Step 2
+    watershed_geojson = result_gdf.__geo_interface__
+    state.selected_watershed_geojson.set(watershed_geojson)
+
+    # Save watershed info to config
     save_selected_watershed(current_id, level=selected_level.value)
-    
+
     print(f"[STEP1] Submit: Watershed={current_id}, Return Period={selected_return_period.value}")
-    
-    # Navigate to Step 2
-    # solara.use_router().push("/step-2-visualization")  # Navigate to Step 2
+    print(f"[STEP1] GeoJSON saved to global state")
+
+    # Start transition
+    state.is_transitioning.set(True)
+
+    # Navigate to Step 2 after transition delay
+    import time
+    import threading
+
+    def navigate_after_delay():
+        time.sleep(5)
+        state.current_step.set(2)
+        state.is_transitioning.set(False)
+
+    threading.Thread(target=navigate_after_delay, daemon=True).start()
 
 
 @solara.component
@@ -367,6 +388,9 @@ def Page():
     
     # Debug: Print state snapshot on each render
     Step1State.print()
+
+    # Determine if showing transition overlay
+    show_transition = state.is_transitioning.value
 
     with solara.Column(style={"height": "100vh"}):
         solara.Title(STEP1_TITLE)
@@ -568,6 +592,37 @@ def Page():
         )
 
         solara.display(m)
+
+        # Transition overlay (rendered on top of everything)
+        if show_transition:
+            with solara.Column(style={
+                "position": "fixed",
+                "top": "0",
+                "left": "0",
+                "width": "100vw",
+                "height": "100vh",
+                "background": "rgba(0, 0, 0, 0.8)",
+                "z-index": "9999",
+                "display": "flex",
+                "align-items": "center",
+                "justify-content": "center",
+                "flex-direction": "column",
+            }):
+                solara.HTML(tag="div", unsafe_innerHTML="""
+                    <div style="text-align: center; color: white;">
+                        <h2 style="margin-bottom: 2rem; font-size: 2rem;">Loading Flood Visualization...</h2>
+                        <div style="margin: 2rem 0;">
+                            <div style="width: 80px; height: 80px; border: 8px solid #f3f3f3; border-top: 8px solid #3498db; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto;"></div>
+                        </div>
+                        <p style="font-size: 1.2rem; opacity: 0.8;">Preparing watershed data and model outputs...</p>
+                    </div>
+                    <style>
+                        @keyframes spin {
+                            0% { transform: rotate(0deg); }
+                            100% { transform: rotate(360deg); }
+                        }
+                    </style>
+                """)
 
 
 if __name__ == "__main__":

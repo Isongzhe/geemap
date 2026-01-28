@@ -215,18 +215,39 @@ def _create_tile_clients():
 def _create_watershed_layer():
     """
     Create a GeoJSON layer for the watershed boundary.
-    
+
+    Uses GeoJSON from global state (passed from Step 1).
+    Falls back to loading from file if state is empty.
+
     Returns:
         GeoJSON: ipyleaflet GeoJSON layer or None if not available
     """
+    # Try to get GeoJSON from global state first (preferred)
+    watershed_geojson = state.selected_watershed_geojson.value
+    watershed_id = state.selected_watershed_id.value
+
+    if watershed_geojson is not None:
+        print(f"[STEP2] Using watershed GeoJSON from Step 1 (ID: {watershed_id})")
+        return GeoJSON(
+            data=watershed_geojson,
+            style={
+                'color': WATERSHED_COLOR,
+                'fillOpacity': 0.0,
+                'weight': WATERSHED_LINE_WIDTH
+            },
+            name=f"Watershed {watershed_id}"
+        )
+
+    # Fallback: Load from config file
     if not WATERSHED_PATH or not WATERSHED_ID:
         return None
-    
+
     try:
         gdf = gpd.read_file(WATERSHED_PATH)
         target = gdf[gdf['HYBAS_ID'] == WATERSHED_ID]
-        
+
         if not target.empty:
+            print(f"[STEP2] Loaded watershed from file (ID: {WATERSHED_ID})")
             return GeoJSON(
                 data=target.__geo_interface__,
                 style={
@@ -238,7 +259,7 @@ def _create_watershed_layer():
             )
     except Exception as e:
         print(f"[STEP2] Error loading watershed: {e}")
-    
+
     return None
 
 
@@ -265,9 +286,12 @@ def Page():
     
     # Create tile clients (memoized)
     tile_clients = solara.use_memo(_create_tile_clients, dependencies=[])
-    
-    # Create watershed layer (memoized)
-    watershed_layer = solara.use_memo(_create_watershed_layer, dependencies=[])
+
+    # Create watershed layer (memoized, updates when global state changes)
+    watershed_layer = solara.use_memo(
+        _create_watershed_layer,
+        dependencies=[state.selected_watershed_geojson.value, state.selected_watershed_id.value]
+    )
     
     def update_layers():
         """
