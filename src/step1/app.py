@@ -19,11 +19,9 @@ from src.step1.utils import (
     get_watershed_bounds,
     calculate_zoom_level,
     save_selected_watershed,
-    get_available_regions,
-    get_region_display_name,
     filter_nearby_watersheds,
-    find_watersheds_by_coordinates,
-    load_all_regions_at_level,  # Load all regions at a given level
+    load_watersheds_in_viewport,
+    get_level_for_zoom,
 )
 from src.config import (
     DEFAULT_CENTER,
@@ -42,10 +40,8 @@ selected_level = solara.reactive(2)  # Current level selection (default: 2)
 selected_watershed_id = solara.reactive(None)  # Currently selected HYBAS_ID
 selected_watershed_info = solara.reactive(None)  # Dict with SUB_AREA, UP_AREA metadata
 watershed_result_gdf = solara.reactive(None)  # Single selected watershed GeoDataFrame
-watershed_context_gdf = solara.reactive(None)  # Nearby watersheds for context (optional)
-watershed_global_gdf = solara.reactive(None)  # Global watersheds for current level
-show_context_layer = solara.reactive(False)  # Whether to show nearby watersheds
-show_global_layer = solara.reactive(True)  # Whether to show global watersheds (default: ON)
+watershed_global_gdf = solara.reactive(None)  # Viewport watersheds
+show_global_layer = solara.reactive(False)  # Whether to show watersheds (default: OFF for demo)
 layer_version = solara.reactive(0)  # Version counter to force layer refresh
 
 search_id_input = solara.reactive("")  # User input for HYBAS_ID search
@@ -82,10 +78,8 @@ class Step1State:
 
             # Layers
             "show_global": show_global_layer.value,
-            "show_context": show_context_layer.value,
             "layer_version": layer_version.value,
             "global_gdf_count": len(watershed_global_gdf.value) if watershed_global_gdf.value is not None else 0,
-            "context_gdf_count": len(watershed_context_gdf.value) if watershed_context_gdf.value is not None else 0,
             "result_gdf_count": len(watershed_result_gdf.value) if watershed_result_gdf.value is not None else 0,
 
             # Search
@@ -113,7 +107,6 @@ class Step1State:
         print(f"Map Zoom: {state['map_zoom']}")
         print("-" * 50)
         print(f"Show Global: {state['show_global']} ({state['global_gdf_count']} features)")
-        print(f"Show Context: {state['show_context']} ({state['context_gdf_count']} features)")
         print(f"Selected: {state['result_gdf_count']} features")
         print(f"Layer Version: {state['layer_version']}")
         print("-" * 50)
@@ -151,9 +144,10 @@ def load_initial_data():
         selected_watershed_id.set(default_id)
 
 
-def load_global_watershed_data():
+def load_viewport_watersheds():
     """
-    Load all regions at the selected level.
+    Load watersheds in current viewport based on zoom level.
+    Replaces load_global_watershed_data().
     """
     if not show_global_layer.value:
         watershed_global_gdf.set(None)
@@ -163,22 +157,28 @@ def load_global_watershed_data():
     loading.set(True)
     error_message.set("")
 
-    try:
-        level = selected_level.value
-        print(f"[DEBUG load_global] Loading ALL regions at level {level}")
+    center_lat, center_lon = map_center.value
+    zoom = map_zoom.value
 
-        gdf = load_all_regions_at_level(level)
+    print(f"[DEBUG app] Loading viewport: center=({center_lat:.2f},{center_lon:.2f}), zoom={zoom}")
+
+    gdf = load_watersheds_in_viewport(
+        center_lat=center_lat,
+        center_lon=center_lon,
+        zoom=zoom,
+        max_features=5000
+    )
+
+    if len(gdf) > 0:
         watershed_global_gdf.set(gdf)
-        error_message.set(f"Loaded {len(gdf)} watersheds")
-
-        layer_version.set(layer_version.value + 1)
-
-    except Exception as e:
-        error_message.set(f"Error loading data: {str(e)}")
+        level = get_level_for_zoom(zoom)
+        error_message.set(f"Loaded {len(gdf)} watersheds (level {level})")
+    else:
         watershed_global_gdf.set(None)
-        show_global_layer.set(False)
-    finally:
-        loading.set(False)
+        error_message.set("No watersheds in viewport")
+
+    layer_version.set(layer_version.value + 1)
+    loading.set(False)
 
 
 
@@ -236,12 +236,12 @@ def handle_search():
 def handle_hybas_id_search():
     """
     Search for watershed by HYBAS_ID.
-    
+
     Workflow:
     1. Parse HYBAS_ID to determine region and level (from ID structure)
-    2. Load full shapefile for that region/level
-    3. Apply spatial filtering to only keep nearby watersheds
-    4. Update UI with filtered data (prevents WebSocket overload)
+    2. Find the watershed and highlight it
+    3. Center map on the watershed
+    4. Viewport loading will automatically load nearby watersheds
     """
     search_text = search_id_input.value.strip()
     if not search_text:
@@ -257,25 +257,13 @@ def handle_hybas_id_search():
     loading.set(True)
     error_message.set("")
 
-    # Step 1: Find the watershed (auto-detects region/level from ID)
     result_gdf, region, level = load_watershed_by_id(hybas_id)
 
     if result_gdf is not None and not result_gdf.empty:
-        # Update state to match the found watershed
         selected_level.set(level)
         selected_watershed_id.set(hybas_id)
+        watershed_result_gdf.set(result_gdf)
 
-        # Step 2: Load full watershed dataset for this region/level
-        full_gdf = load_watersheds(region, level)
-        
-        # Step 3: Apply spatial filtering to get nearby watersheds (for optional context layer)
-        filtered_gdf = filter_nearby_watersheds(full_gdf, hybas_id, expansion_factor=1.5)
-        
-        # Store the selected watershed and nearby context separately
-        watershed_result_gdf.set(result_gdf)  # Always show the selected one
-        watershed_context_gdf.set(filtered_gdf)  # Nearby watersheds (optional)
-
-        # Step 4: Update info panel with watershed metadata
         row = result_gdf.iloc[0]
         selected_watershed_info.set({
             'HYBAS_ID': hybas_id,
@@ -283,7 +271,6 @@ def handle_hybas_id_search():
             'UP_AREA': row.get('UP_AREA', 'N/A'),
         })
 
-        # Step 5: Center map on the watershed
         bounds = get_watershed_bounds(result_gdf)
         center_lat = (bounds[1] + bounds[3]) / 2
         center_lon = (bounds[0] + bounds[2]) / 2
@@ -291,7 +278,7 @@ def handle_hybas_id_search():
 
         map_center.set([center_lat, center_lon])
         map_zoom.set(zoom)
-        error_message.set("")
+        error_message.set(f"Found watershed {hybas_id}")
     else:
         error_message.set(f"Watershed {hybas_id} not found")
 
@@ -362,22 +349,16 @@ def Page():
     # solara.use_memo ensures this runs exactly once, not on every re-render
     solara.use_memo(load_initial_data, dependencies=[])
 
-    # REMOVED: Auto-loading on region/level change to improve performance
-    # Watersheds are now loaded only when user searches by HYBAS_ID
-    # This prevents WebSocket from being overwhelmed by thousands of polygons
-
-    # Auto-load all regions when checkbox state or level changes
+    # Auto-load viewport watersheds when checkbox state or zoom changes
     solara.use_effect(
-        load_global_watershed_data,
-        [show_global_layer.value, selected_level.value]
+        load_viewport_watersheds,
+        [show_global_layer.value, map_zoom.value]
     )
 
     # Get current state values (these will update when reactive state changes)
     current_id = selected_watershed_id.value
     result_gdf = watershed_result_gdf.value  # Selected watershed
-    context_gdf = watershed_context_gdf.value  # Nearby watersheds
-    global_gdf = watershed_global_gdf.value  # Global region/level shp
-    show_context = show_context_layer.value  # Whether to show context layer
+    global_gdf = watershed_global_gdf.value  # Viewport watersheds
     show_global = show_global_layer.value  # Whether to show global layer
     layer_ver = layer_version.value  # Version counter for forcing updates
     info = selected_watershed_info.value
@@ -460,7 +441,6 @@ def Page():
             # Watershed Info Panel
             with solara.Card("Selected Watershed", elevation=0, style={"margin-bottom": "1rem"}):
                 if info:
-                    # Format area values
                     sub_area = f"{info['SUB_AREA']:,.2f}" if isinstance(info['SUB_AREA'], (int, float)) else str(info['SUB_AREA'])
                     up_area = f"{info['UP_AREA']:,.2f}" if isinstance(info['UP_AREA'], (int, float)) else str(info['UP_AREA'])
 
@@ -468,13 +448,6 @@ def Page():
                     solara.Markdown(f"**Sub Area:** {sub_area} km²")
                     solara.Markdown(f"**Upstream Area:** {up_area} km²")
 
-                    solara.Checkbox(
-                        label="Show Nearby Watersheds",
-                        value=show_context,
-                        on_value=show_context_layer.set,
-                    )
-
-                    # Submit Button (at end of card)
                     solara.Button(
                         "Submit & Continue to Step 2",
                         on_click=handle_submit,
@@ -483,7 +456,7 @@ def Page():
                         style={"margin-top": "1rem"},
                     )
                 else:
-                    solara.Text("Click a watershed or search by ID")
+                    solara.Text("Search or click a watershed to select")
 
             # Error Display
             if error:
@@ -519,24 +492,17 @@ def Page():
 
         def update_map_layers():
             """
-            Update all map layers and view in one effect.
-            This ensures proper cleanup and prevents layer accumulation.
+            Update map layers when state changes.
+            Simplified to only show viewport watersheds + selected watershed.
             """
-            print(f"[DEBUG update_map_layers] Starting layer update...")
-            print(f"  - map_center: {map_center.value}, map_zoom: {map_zoom.value}")
-            print(f"  - show_global: {show_global}, global_gdf: {global_gdf is not None}")
-            print(f"  - show_context: {show_context}, context_gdf: {context_gdf is not None}")
-            print(f"  - result_gdf: {result_gdf is not None}")
+            print(f"[DEBUG update_layers] Updating layers...")
 
-            # Step 1: Clear all existing layers
             m.clear_layers()
             m.add_basemap("OpenStreetMap")
 
-            # Step 2: Update map view
             m.center = map_center.value
             m.zoom = map_zoom.value
 
-            # Step 3: Define click handler factory
             def make_click_handler(source_gdf):
                 def handler(event=None, feature=None, **kwargs):
                     if feature:
@@ -554,11 +520,9 @@ def Page():
                                 })
                 return handler
 
-            # Step 4: Add layers in order (bottom to top)
-
-            # Layer 0: Global Region/Level ShP
+            # Layer 1: Viewport watersheds (blue, clickable)
             if show_global and global_gdf is not None and not global_gdf.empty:
-                print(f"[DEBUG] Adding global layer with {len(global_gdf)} watersheds")
+                print(f"[DEBUG update_layers] Adding {len(global_gdf)} viewport watersheds")
                 style_global = {
                     'color': 'blue',
                     'fillOpacity': 0.2,
@@ -568,27 +532,14 @@ def Page():
                     data=global_gdf.__geo_interface__,
                     style=style_global,
                     hover_style={'fillOpacity': 0.35},
-                    name=f"All Regions Level {selected_level.value}"
+                    name="Watersheds"
                 )
                 json_global.on_click(make_click_handler(global_gdf))
                 m.add_layer(json_global)
 
-            # Layer 1: Nearby watersheds (context)
-            if show_context and context_gdf is not None and not context_gdf.empty:
-                print(f"[DEBUG] Adding context layer with {len(context_gdf)} watersheds")
-                style_context = {'color': 'blue', 'fillOpacity': 0.1, 'weight': 1}
-                json_context = GeoJSON(
-                    data=context_gdf.__geo_interface__,
-                    style=style_context,
-                    hover_style={'fillOpacity': 0.3},
-                    name="Nearby Watersheds"
-                )
-                json_context.on_click(make_click_handler(context_gdf))
-                m.add_layer(json_context)
-
-            # Layer 2: Selected watershed (top, highlighted)
+            # Layer 2: Selected watershed (highlighted)
             if result_gdf is not None and not result_gdf.empty:
-                print(f"[DEBUG] Adding selected watershed layer")
+                print(f"[DEBUG update_layers] Adding selected watershed")
                 style_selected = {
                     'color': 'red',
                     'fillColor': 'yellow',
@@ -598,23 +549,20 @@ def Page():
                 json_selected = GeoJSON(
                     data=result_gdf.__geo_interface__,
                     style=style_selected,
-                    name="Selected Watershed"
+                    name="Selected"
                 )
                 m.add_layer(json_selected)
 
-            print(f"[DEBUG update_map_layers] Layer update complete")
+            print(f"[DEBUG update_layers] Done")
 
-        # Trigger layer update when any relevant state changes
         solara.use_effect(
             update_map_layers,
             dependencies=[
                 map_center.value,
                 map_zoom.value,
                 show_global,
-                show_context,
-                layer_ver,  # Force refresh when version changes
-                id(global_gdf),  # Use id() to detect GeoDataFrame changes
-                id(context_gdf),
+                layer_ver,
+                id(global_gdf),
                 id(result_gdf),
             ]
         )

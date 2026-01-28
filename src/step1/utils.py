@@ -276,10 +276,155 @@ def filter_nearby_watersheds(
     
     return filtered_gdf
 
+def calculate_viewport_bounds(center_lat: float, center_lon: float, zoom: int, buffer_factor: float = 1.3) -> tuple:
+    """
+    Calculate viewport bounding box from map center and zoom level.
+
+    Args:
+        center_lat: Map center latitude
+        center_lon: Map center longitude
+        zoom: Leaflet zoom level (1-18)
+        buffer_factor: Viewport expansion (1.3 = 30% buffer)
+
+    Returns:
+        (minx, miny, maxx, maxy) in degrees
+    """
+    degrees_visible = 360 / (2 ** zoom)
+    half_width = degrees_visible / 2 * buffer_factor
+    half_height = degrees_visible / 2 * buffer_factor
+
+    minx = max(-180, center_lon - half_width)
+    maxx = min(180, center_lon + half_width)
+    miny = max(-90, center_lat - half_height)
+    maxy = min(90, center_lat + half_height)
+
+    return (minx, miny, maxx, maxy)
+
+
+def get_level_for_zoom(zoom: int) -> int:
+    """
+    Map zoom level to HydroBASINS level (max 8).
+
+    Strategy:
+    - zoom 1-4: level 1 (continental)
+    - zoom 5-6: level 2 (large basins)
+    - zoom 7-8: level 3 (regional)
+    - zoom 9-10: level 5 (sub-regional)
+    - zoom 11-12: level 6 (local)
+    - zoom 13+: level 8 (detailed)
+
+    Args:
+        zoom: Leaflet zoom level
+
+    Returns:
+        HydroBASINS level (1-8)
+    """
+    if zoom <= 4:
+        return 1
+    elif zoom <= 6:
+        return 2
+    elif zoom <= 8:
+        return 3
+    elif zoom <= 10:
+        return 5
+    elif zoom <= 12:
+        return 6
+    else:
+        return 8
+
+
+def find_intersecting_regions(minx: float, miny: float, maxx: float, maxy: float) -> list:
+    """
+    Find regions that intersect with viewport bounds.
+
+    Args:
+        minx, miny, maxx, maxy: Viewport bounding box
+
+    Returns:
+        List of region codes (e.g., ['as', 'si'])
+    """
+    region_bboxes = {
+        'af': (-20, -35, 52, 38),
+        'ar': (-180, 60, 180, 90),
+        'as': (57, 1, 151, 56),
+        'au': (110, -45, 180, -10),
+        'eu': (-10, 35, 70, 72),
+        'gr': (-75, 59, -10, 84),
+        'na': (-170, 15, -50, 72),
+        'sa': (-82, -56, -34, 13),
+        'si': (40, 45, 180, 78),
+    }
+
+    intersecting = []
+    for region, (rminx, rminy, rmaxx, rmaxy) in region_bboxes.items():
+        if not (maxx < rminx or minx > rmaxx or maxy < rminy or miny > rmaxy):
+            intersecting.append(region)
+
+    return intersecting
+
+
+def load_watersheds_in_viewport(
+    center_lat: float,
+    center_lon: float,
+    zoom: int,
+    max_features: int = 5000
+) -> gpd.GeoDataFrame:
+    """
+    Load watersheds visible in current viewport with feature limit.
+
+    This prevents WebSocket overload by:
+    1. Auto-selecting appropriate level based on zoom
+    2. Spatial filtering to viewport bounds only
+    3. Hard limit on number of features
+
+    Args:
+        center_lat, center_lon: Map center coordinates
+        zoom: Current zoom level
+        max_features: Maximum features to return (safety limit)
+
+    Returns:
+        GeoDataFrame with watersheds in viewport
+    """
+    minx, miny, maxx, maxy = calculate_viewport_bounds(center_lat, center_lon, zoom)
+
+    level = get_level_for_zoom(zoom)
+
+    regions = find_intersecting_regions(minx, miny, maxx, maxy)
+
+    if not regions:
+        return gpd.GeoDataFrame()
+
+    print(f"[DEBUG load_viewport] zoom={zoom} → level={level}, regions={regions}")
+    print(f"[DEBUG load_viewport] bounds=({minx:.2f},{miny:.2f},{maxx:.2f},{maxy:.2f})")
+
+    gdfs = []
+    for region in regions:
+        gdf = load_watersheds(region, level)
+
+        filtered = gdf.cx[minx:maxx, miny:maxy]
+
+        if len(filtered) > 0:
+            gdfs.append(filtered)
+            print(f"[DEBUG load_viewport]   {region}: {len(filtered)} features")
+
+    if not gdfs:
+        return gpd.GeoDataFrame()
+
+    combined = gpd.pd.concat(gdfs, ignore_index=True)
+
+    if len(combined) > max_features:
+        print(f"[DEBUG load_viewport] Limiting {len(combined)} → {max_features} features")
+        combined = combined.nlargest(max_features, 'SUB_AREA')
+
+    print(f"[DEBUG load_viewport] Total: {len(combined)} features loaded")
+
+    return combined
+
+
 def find_watersheds_by_coordinates(
-    region: str, 
-    level: int, 
-    lat: float, 
+    region: str,
+    level: int,
+    lat: float,
     lon: float,
     buffer_degrees: float = 5.0
 ) -> gpd.GeoDataFrame:
