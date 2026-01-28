@@ -373,10 +373,11 @@ def Page():
     # solara.use_memo ensures this runs exactly once, not on every re-render
     solara.use_memo(load_initial_data, dependencies=[])
 
-    # Auto-load viewport watersheds when checkbox state or zoom changes
+    # Load viewport watersheds only when show_global_layer changes
+    # (not on zoom changes - user must click "Load Watersheds in View" button)
     solara.use_effect(
         load_viewport_watersheds,
-        [show_global_layer.value, map_zoom.value]
+        [show_global_layer.value]  # Removed map_zoom.value
     )
 
     # Get current state values (these will update when reactive state changes)
@@ -600,12 +601,12 @@ def Page():
 
             print(f"[DEBUG update_layers] Done")
 
-        # Update layers when zoom/data changes (not on pan)
+        # Update layers when data changes (not on zoom/pan)
         solara.use_effect(
             update_map_layers,
             dependencies=[
                 # map_center.value,  # Removed: panning doesn't need layer rebuild
-                map_zoom.value,      # Keep: zoom changes trigger level switch
+                # map_zoom.value,    # Removed: zoom doesn't auto-reload (user clicks button)
                 show_global,
                 layer_ver,
                 id(global_gdf),
