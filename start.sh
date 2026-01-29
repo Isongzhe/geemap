@@ -21,20 +21,9 @@ if [ ! -d "/tmp/geemap_demo_cache" ]; then
     uv run scripts/generate_demo_tiles.py
 fi
 
-# 3. Start TileServers in background tmux session
+# 3. Start Solara Application (TileClients will be created on first Step 2 access)
 echo ""
-echo "Step 3: Starting TileServers..."
-tmux new-session -d -s geemap_tiles -n "tileservers"
-tmux send-keys -t geemap_tiles:tileservers "cd $(pwd)" C-m
-tmux send-keys -t geemap_tiles:tileservers "uv run python scripts/start_tileservers.py" C-m
-
-# Wait for TileServers to start
-echo "Waiting for TileServers to initialize..."
-sleep 3
-
-# 4. Start Solara Application
-echo ""
-echo "Step 4: Starting Solara application..."
+echo "Step 3: Starting Solara application..."
 tmux new-session -d -s $SESSION -n "solara"
 tmux send-keys -t $SESSION:solara "export PYTHONUNBUFFERED=1" C-m
 tmux send-keys -t $SESSION:solara "export PYTHONPATH=\$(pwd):\$PYTHONPATH" C-m
