@@ -635,9 +635,10 @@ def Page():
             water_layer = get_leaflet_tile_layer(
                 tile_clients['water'],
                 name="Permanent Water",
-                colormap=["#FFFFFF00", '#0000FF'],
+                colormap='blues',  # Use built-in colormap (0=transparent, 1=blue)
                 vmin=0,
                 vmax=1,
+                nodata=0,  # Make 0 values transparent
                 opacity=PERMANENT_WATER_OPACITY
             )
             water_layer.visible = False  # Hidden by default
@@ -813,7 +814,6 @@ def Page():
             solara.Markdown("---")
 
             solara.Markdown("### Layers Info")
-            solara.Markdown("All layers are stacked and controlled via **Layer Manager** (top-right).")
             solara.Markdown("")
             solara.Markdown("**Default visibility:**")
             solara.Markdown("- Sentinel-2 RGB")
@@ -829,7 +829,7 @@ def Page():
                 # Combined legend for all layers
                 solara.HTML(unsafe_innerHTML="""
                     <div style="font-size: 14px; line-height: 1.8;">
-                        <p style="margin-top: 0;"><strong>Flood Classification:</strong></p>
+                        <p style="margin-top: 0; font-weight: bold;">Flood Classification:</p>
                         <div style="display: flex; align-items: center; margin-bottom: 4px;">
                             <span style="display: inline-block; width: 20px; height: 14px; background-color: #000000; margin-right: 8px; border: 1px solid #999;"></span>
                             <span><strong>0</strong>: Invalid</span>
@@ -847,13 +847,13 @@ def Page():
                             <span><strong>3</strong>: Cloud (White)</span>
                         </div>
 
-                        <p><strong>Permanent Water:</strong></p>
+                        <p style="font-weight: bold; margin-top: 8px;">Permanent Water:</p>
                         <div style="display: flex; align-items: center; margin-bottom: 12px;">
                             <span style="display: inline-block; width: 20px; height: 14px; background-color: #0000FF; margin-right: 8px; border: 1px solid #999;"></span>
                             <span>Permanent water (Pure Blue)</span>
                         </div>
 
-                        <p><strong>Model Uncertainty:</strong></p>
+                        <p style="font-weight: bold; margin-top: 8px;">Model Uncertainty:</p>
                         <div style="display: flex; align-items: center; margin-bottom: 4px;">
                             <span style="display: inline-block; width: 20px; height: 14px; background: linear-gradient(to right, #d73027, #fee08b, #1a9850); margin-right: 8px; border: 1px solid #999;"></span>
                             <span>Red (High) → Yellow → Green (Low)</span>

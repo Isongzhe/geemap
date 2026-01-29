@@ -69,7 +69,7 @@ WATERSHED_COLOR = '#FFD700'
 WATERSHED_LINE_WIDTH = 4
 
 # Layer opacity settings
-CLASSIFICATION_OPACITY = 0.6  # Semi-transparent for layering
+CLASSIFICATION_OPACITY = 0.5  # Semi-transparent for layering
 PERMANENT_WATER_OPACITY = 1.0  # Fully opaque
 
 # =============================================================================
