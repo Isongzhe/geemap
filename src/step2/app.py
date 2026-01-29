@@ -6,14 +6,21 @@ with analog selection, permanent water visualization, and similarity scoring.
 
 Features:
 - Multi-event selection from analog catalog
-- Permanent water boundary overlay
-- Split-map view for side-by-side comparison
+- All-in-one layer view with independent layer control via Layer Manager
+- Layer stack (bottom to top):
+  * Basemap (OpenStreetMap)
+  * Permanent Water (hidden by default, blue overlay)
+  * Sentinel-2 RGB (visible by default)
+  * Flood Classification (visible by default)
+  * Model Uncertainty (hidden by default)
+  * Watershed Boundary (always visible)
+- Users can toggle any layer on/off and adjust opacity via Layer Manager
 - Analytics panel with event table and score distribution chart
-- Watershed boundary overlay
 """
 
 import os
 import functools
+import time
 from pathlib import Path
 import base64
 import solara
@@ -22,7 +29,7 @@ import rioxarray
 import ee
 import geopandas as gpd
 import pandas as pd
-from ipyleaflet import GeoJSON, SplitMapControl, WidgetControl, FullScreenControl
+from ipyleaflet import GeoJSON, WidgetControl, FullScreenControl
 from localtileserver import TileClient, get_leaflet_tile_layer
 from matplotlib.colors import ListedColormap
 import plotly.graph_objects as go
@@ -31,8 +38,10 @@ from typing import Optional
 
 import src.state as state
 from src.config import (
-    INPUT_TILE_PORT,
-    OUTPUT_TILE_PORT,
+    EVENT_2020_INPUT_PORT,
+    EVENT_2020_OUTPUT_PORT,
+    EVENT_2024_INPUT_PORT,
+    EVENT_2024_OUTPUT_PORT,
     PERMANENT_WATER_PORT,
     EE_PROJECT,
     DEFAULT_CENTER,
@@ -57,17 +66,25 @@ from src.step2.utils import (
     find_event_preview,
     load_analog_catalog,
     build_file_mapping,
+    get_glofas_plot_path,
 )
 
 # ============================================================================
 # Global TileClient Singleton
 # ============================================================================
 
-# Module-level cache to prevent recreating TileClient on hot-reload
-_tile_clients_cache = {}
+# Persistent TileClients - created once, never shutdown
+_DEMO_TILE_CLIENTS = {
+    '2020-04-18': {'input': None, 'output': None},
+    '2024-04-20': {'input': None, 'output': None},
+}
+_PERMANENT_WATER_CLIENT = None
+_CLIENTS_INITIALIZED = False
 
-# Module-level reference to current SplitMapControl (singleton)
-_current_split_control = None
+# Demo mode: Use local cached files for instant loading
+DEMO_MODE = True
+DEMO_EVENTS = ['2020-04-18', '2024-04-20']
+LOCAL_CACHE_DIR = Path('/tmp/geemap_demo_cache')
 
 # ============================================================================
 # Lazy Initialization (Moved to Page() function to prevent blocking Step 1)
@@ -175,8 +192,6 @@ def initialize_step2_data():
 # Reactive State
 # ============================================================================
 
-map_layer_mode = solara.reactive("Flood Classification")  # "Flood Classification" or "Uncertainty"
-
 # Analog event management
 analog_events_df = solara.reactive(None)  # DataFrame of analog events from CSV
 selected_event_date = solara.reactive(None)  # Currently selected event date
@@ -256,7 +271,6 @@ def _create_base_map():
         toolbar_ctrl=False,
         draw_ctrl=False,
         search_control=False,
-        data_ctrl=False,
         height="800px",
     )
     # Add modern layer manager for better UX
@@ -266,129 +280,230 @@ def _create_base_map():
 
 def _create_permanent_water_client():
     """
-    Create TileClient for permanent water COG (static across all events).
-    Uses module-level singleton cache to prevent port conflicts.
-
-    Returns:
-        TileClient or None
+    Create TileClient for permanent water from local cache.
+    Called once during initialization.
     """
-    global _tile_clients_cache
+    global _PERMANENT_WATER_CLIENT
 
-    # Check if already cached
-    if 'water' in _tile_clients_cache:
-        return _tile_clients_cache['water']
+    if _PERMANENT_WATER_CLIENT is not None:
+        return _PERMANENT_WATER_CLIENT
 
-    water_path = permanent_water_path.value
-    if not water_path or not os.path.exists(water_path):
-        print("[STEP2] Permanent water file not configured or not found")
-        return None
-
-    try:
-        water_client = TileClient(
-            water_path,
-            port=PERMANENT_WATER_PORT,
-            host='0.0.0.0',
-            client_port=PERMANENT_WATER_PORT,
-            client_host='localhost'
+    demo_water = LOCAL_CACHE_DIR / 'permanent_water.tif'
+    if not demo_water.exists():
+        raise FileNotFoundError(
+            f"Permanent water cache missing. Run: uv run scripts/generate_demo_tiles.py"
         )
-        _tile_clients_cache['water'] = water_client
-        print(f"[STEP2] Permanent water TileClient created on port {PERMANENT_WATER_PORT}")
-        return water_client
-    except Exception as e:
-        print(f"[STEP2] Error creating permanent water TileClient: {e}")
-        return None
+    
+    print("[STEP2] Creating permanent water TileClient (persistent)")
+    _PERMANENT_WATER_CLIENT = TileClient(
+        str(demo_water),
+        port=PERMANENT_WATER_PORT,
+        host='0.0.0.0',
+        client_port=PERMANENT_WATER_PORT,
+        client_host='localhost'
+    )
+    return _PERMANENT_WATER_CLIENT
+
+
+def _initialize_all_demo_clients():
+    """
+    Initialize ALL TileClients for both demo events at startup.
+    These clients are NEVER shutdown - we just switch between them.
+    
+    Port allocation:
+    - 2020-04-18: 9100 (input), 9101 (output)
+    - 2024-04-20: 9103 (input), 9104 (output)
+    - Permanent water: 9102 (shared)
+    """
+    global _DEMO_TILE_CLIENTS, _PERMANENT_WATER_CLIENT, _CLIENTS_INITIALIZED
+    
+    if _CLIENTS_INITIALIZED:
+        print("[STEP2] Clients already initialized, skipping")
+        return
+    
+    print("[STEP2] Initializing persistent TileClients for demo mode...")
+    
+    # 1. Create permanent water client (shared)
+    _create_permanent_water_client()
+    
+    # 2. Create 2020-04-18 clients
+    event_2020_dir = LOCAL_CACHE_DIR / '2020-04-18'
+    input_2020 = event_2020_dir / 'input.tif'
+    output_2020 = event_2020_dir / 'output.tif'
+    
+    if not input_2020.exists() or not output_2020.exists():
+        raise FileNotFoundError(
+            f"Demo cache missing for 2020-04-18. Run: uv run scripts/generate_demo_tiles.py"
+        )
+    
+    print("[STEP2] Creating clients for 2020-04-18 (ports 9100, 9101)")
+    _DEMO_TILE_CLIENTS['2020-04-18']['input'] = TileClient(
+        str(input_2020),
+        port=EVENT_2020_INPUT_PORT,
+        host='0.0.0.0',
+        client_port=EVENT_2020_INPUT_PORT,
+        client_host='localhost'
+    )
+    _DEMO_TILE_CLIENTS['2020-04-18']['output'] = TileClient(
+        str(output_2020),
+        port=EVENT_2020_OUTPUT_PORT,
+        host='0.0.0.0',
+        client_port=EVENT_2020_OUTPUT_PORT,
+        client_host='localhost'
+    )
+    
+    # 3. Create 2024-04-20 clients
+    event_2024_dir = LOCAL_CACHE_DIR / '2024-04-20'
+    input_2024 = event_2024_dir / 'input.tif'
+    output_2024 = event_2024_dir / 'output.tif'
+    
+    if not input_2024.exists() or not output_2024.exists():
+        raise FileNotFoundError(
+            f"Demo cache missing for 2024-04-20. Run: uv run scripts/generate_demo_tiles.py"
+        )
+    
+    print("[STEP2] Creating clients for 2024-04-20 (ports 9103, 9104)")
+    _DEMO_TILE_CLIENTS['2024-04-20']['input'] = TileClient(
+        str(input_2024),
+        port=EVENT_2024_INPUT_PORT,
+        host='0.0.0.0',
+        client_port=EVENT_2024_INPUT_PORT,
+        client_host='localhost'
+    )
+    _DEMO_TILE_CLIENTS['2024-04-20']['output'] = TileClient(
+        str(output_2024),
+        port=EVENT_2024_OUTPUT_PORT,
+        host='0.0.0.0',
+        client_port=EVENT_2024_OUTPUT_PORT,
+        client_host='localhost'
+    )
+    
+    _CLIENTS_INITIALIZED = True
+    print("[STEP2] All demo TileClients initialized and ready")
+
+
+def _get_clients_for_event(event_date: str) -> dict:
+    """
+    Get pre-initialized TileClients for the given event.
+    NO creation, NO shutdown - just returns existing clients.
+    
+    Args:
+        event_date: '2020-04-18' or '2024-04-20'
+    
+    Returns:
+        Dict with keys 'input', 'output', 'water'
+    """
+    if event_date not in DEMO_EVENTS:
+        raise ValueError(f"Event {event_date} not supported. Only {DEMO_EVENTS} available.")
+    
+    if not _CLIENTS_INITIALIZED:
+        raise RuntimeError("Clients not initialized. Call _initialize_all_demo_clients() first.")
+    
+    return {
+        'input': _DEMO_TILE_CLIENTS[event_date]['input'],
+        'output': _DEMO_TILE_CLIENTS[event_date]['output'],
+        'water': _PERMANENT_WATER_CLIENT
+    }
+
 
 
 def _create_tile_clients_for_event(event_date: str, input_folder: str, output_folder: str):
     """
-    Create or update TileClient instances for a specific event.
+    Create TileClient instances for demo events from local cache.
+    Demo mode only supports: 2020-04-18, 2024-04-20
 
-    Permanent water client is NOT recreated (static across events).
-    Input and output clients are recreated for each event change.
-
-    Uses FILE_MAPPING cache for fast lookups instead of slow glob operations.
-
-    Args:
-        event_date: Event date string
-        input_folder: Folder containing input files (not used if cache available)
-        output_folder: Folder containing output files (not used if cache available)
-
-    Returns:
-        dict: Dictionary with 'input', 'output', and optionally 'water' TileClient instances
+    Returns: Dict with keys 'input', 'output', 'water'
     """
-    global _tile_clients_cache, INPUT_PATH, OUTPUT_PATH
+    global INPUT_PATH, OUTPUT_PATH, _tile_clients_cache
 
-    # Use cached file mapping for fast lookup
-    if event_date in FILE_MAPPING:
-        file_info = FILE_MAPPING[event_date]
-        input_file = file_info.get('input')
-        output_file = file_info.get('output')
-        preview_file = file_info.get('preview')
+    # Shutdown old input/output clients to release ports
+    for key in ['input', 'output']:
+        if key in _tile_clients_cache:
+            old_client = _tile_clients_cache[key]
+            if hasattr(old_client, 'shutdown'):
+                old_client.shutdown()
+                print(f"[STEP2] Shutdown old {key} TileClient")
+            del _tile_clients_cache[key]
+    
+    # Wait for ports to be fully released
+    if len(_tile_clients_cache) == 0 or 'input' not in _tile_clients_cache:
+        time.sleep(0.5)
+
+    # Resolve file paths from local cache
+    new_input_path = None
+    new_output_path = None
+    new_preview_path = None
+
+    if event_date in DEMO_EVENTS:
+        event_dir = LOCAL_CACHE_DIR / event_date
+        demo_input = event_dir / 'input.tif'
+        demo_output = event_dir / 'output.tif'
         
-        print(f"[STEP2] Using cached file mapping for event {event_date}")
+        if not demo_input.exists() or not demo_output.exists():
+            raise FileNotFoundError(
+                f"Demo cache missing for {event_date}. Run: uv run scripts/generate_demo_tiles.py"
+            )
+        
+        new_input_path = str(demo_input)
+        new_output_path = str(demo_output)
+        print(f"[STEP2] DEMO MODE: Using local cache for {event_date}")
+        
+        # Get preview from FILE_MAPPING if available
+        if event_date in FILE_MAPPING:
+            file_info = FILE_MAPPING[event_date]
+            if file_info.get('preview'):
+                new_preview_path = str(file_info.get('preview'))
     else:
-        # Fallback to slow glob operations
-        print(f"[STEP2] WARNING: Event {event_date} not in cache, using fallback discovery")
-        input_file = find_event_input(event_date, input_folder)
-        output_file = find_event_output(event_date, output_folder)
-        preview_file = find_event_preview(event_date, output_folder)
+        raise ValueError(f"Event {event_date} not supported in demo mode. Only {DEMO_EVENTS} are supported.")
+    current_clients = {}
 
-    # Clear old input/output clients (but keep water client)
-    # NOTE: Do NOT call shutdown() - localtileserver manages servers internally
-    # Just remove the reference and let the new TileClient reuse the same port
-    if 'input' in _tile_clients_cache:
-        print(f"[STEP2] Removing old input TileClient reference (port {INPUT_TILE_PORT} will be reused)")
-        del _tile_clients_cache['input']
-
-    if 'output' in _tile_clients_cache:
-        print(f"[STEP2] Removing old output TileClient reference (port {OUTPUT_TILE_PORT} will be reused)")
-        del _tile_clients_cache['output']
-
-    # Create Input TileClient (STRICT S2 CHECK)
-    if input_file and input_file.exists():
-        # Double-check: Ensure file is S2 prefix
-        if not input_file.name.startswith('S2_'):
-            print(f"[STEP2] ERROR: Input file is not S2: {input_file.name}")
+    # 3. Create Input Client
+    if new_input_path:
+        if not Path(new_input_path).name.startswith('S2_'):
+            print(f"[STEP2] ERROR: Input file is not S2: {Path(new_input_path).name}")
             INPUT_PATH = None
         else:
-            INPUT_PATH = str(input_file)
-            _tile_clients_cache['input'] = TileClient(
+            INPUT_PATH = new_input_path
+            print(f"[STEP2] Creating Input TileClient: {Path(INPUT_PATH).name}")
+            input_client = TileClient(
                 INPUT_PATH,
                 port=INPUT_TILE_PORT,
                 host='0.0.0.0',
                 client_port=INPUT_TILE_PORT,
                 client_host='localhost'
             )
-            print(f"[STEP2] Input TileClient created for {event_date}: {input_file.name}")
-    else:
-        INPUT_PATH = None
-        print(f"[STEP2] No S2 input file found for {event_date}")
+            current_clients['input'] = input_client
+            _tile_clients_cache['input'] = input_client  # Update cache
+            print(f"[STEP2] Input TileClient server running on {input_client.server_base_url}")
 
-    # Create Output TileClient (STRICT S2 CHECK)
-    if output_file and output_file.exists():
-        # Double-check: Ensure file is S2 prefix
-        if not output_file.name.startswith('S2_'):
-            print(f"[STEP2] ERROR: Output file is not S2: {output_file.name}")
-            OUTPUT_PATH = None
-        else:
-            OUTPUT_PATH = str(output_file)
-            _tile_clients_cache['output'] = TileClient(
-                OUTPUT_PATH,
-                port=OUTPUT_TILE_PORT,
-                host='0.0.0.0',
-                client_port=OUTPUT_TILE_PORT,
-                client_host='localhost'
-            )
-            print(f"[STEP2] Output TileClient created for {event_date}: {output_file.name}")
-    else:
-        OUTPUT_PATH = None
-        print(f"[STEP2] No S2 output file found for {event_date}")
+    # 4. Create Output Client
+    if new_output_path:
+        OUTPUT_PATH = new_output_path
+        print(f"[STEP2] Creating Output TileClient: {Path(OUTPUT_PATH).name}")
+        output_client = TileClient(
+            OUTPUT_PATH,
+            port=OUTPUT_TILE_PORT,
+            host='0.0.0.0',
+            client_port=OUTPUT_TILE_PORT,
+            client_host='localhost'
+        )
+        current_clients['output'] = output_client
+        _tile_clients_cache['output'] = output_client  # Update cache
+        print(f"[STEP2] Output TileClient server running on {output_client.server_base_url}")
 
-    # Create permanent water client if not already created
+    # 5. Add Water Client (singleton, never recreated)
     if 'water' not in _tile_clients_cache:
         _create_permanent_water_client()
+    if 'water' in _tile_clients_cache:
+        current_clients['water'] = _tile_clients_cache['water']
 
-    return _tile_clients_cache
+    # Validate all clients are ready
+    for key, client in current_clients.items():
+        if not hasattr(client, 'server'):
+            raise RuntimeError(f"TileClient {key} has no server attribute")
+    
+    print(f"[STEP2] All TileClients ready for {event_date}")
+    return current_clients
 
 
 def _create_watershed_layer():
@@ -454,21 +569,28 @@ def Page():
     Provides:
     - Multi-event selection from analog catalog
     - Interactive map with COG tile layers
-    - Permanent water overlay
-    - Split-map view (always enabled)
-    - Layer mode selection (Classification vs Uncertainty)
+    - Independent layer control with layer manager (all layers in one view)
+    - Layer stack order (bottom to top):
+      * Basemap (OpenStreetMap)
+      * Permanent Water (hidden by default)
+      * Sentinel-2 RGB (visible by default)
+      * Flood Classification (visible by default)
+      * Model Uncertainty (hidden by default)
+      * Watershed Boundary (always visible)
+    - All layers can be toggled on/off via Layer Manager
     - Analytics panel with table and chart
-    - Watershed boundary overlay
     """
     # Lazy initialization - only runs once when Step 2 is first opened
     init_data = solara.use_memo(initialize_step2_data, dependencies=[])
+    
+    # Initialize persistent TileClients (only once)
+    solara.use_memo(_initialize_all_demo_clients, dependencies=[])
 
     # Get configuration values
     input_folder = init_data.get("input_folder", "")
     output_folder = init_data.get("output_folder", "")
 
     # Reactive state values
-    layer_mode = map_layer_mode.value
     current_event_date = selected_event_date.value
     current_metadata = selected_event_metadata.value
     events_df = analog_events_df.value
@@ -476,191 +598,125 @@ def Page():
     # Create map widget (memoized)
     map_widget = solara.use_memo(_create_base_map, dependencies=[])
 
-    # Dynamic file loading when event changes
-    def load_files_for_event():
-        if current_event_date and input_folder and output_folder:
-            _create_tile_clients_for_event(current_event_date, input_folder, output_folder)
+    def cleanup_map(m):
+        """Thoroughly clean up map layers (keep basemap only)."""
+        # Clear all layers and re-add basemap
+        m.clear_layers()
+        m.add_basemap("OpenStreetMap")
+        print("[STEP2] Map cleaned up")
 
-            # Update preview image path from cache
-            if current_event_date in FILE_MAPPING:
-                preview_file = FILE_MAPPING[current_event_date].get('preview')
-                preview_image_path.set(str(preview_file) if preview_file else None)
-            else:
-                # Fallback to slow discovery
-                preview_file = find_event_preview(current_event_date, output_folder)
-                preview_image_path.set(str(preview_file) if preview_file else None)
-
-            # Reset map view to watershed center after files are loaded
-            if map_widget and INPUT_PATH:
-                cx, cy, zoom = get_map_center()
-                map_widget.center = [cy, cx]
-                map_widget.zoom = zoom
-                print(f"[STEP2] Map centered on watershed: ({cy:.4f}, {cx:.4f}), zoom={zoom}")
-
-    solara.use_effect(load_files_for_event, dependencies=[current_event_date])
-
-    # Get tile clients after they've been created
-    tile_clients = _tile_clients_cache
-
-    # Create watershed layer (memoized, updates when global state changes)
-    watershed_layer = solara.use_memo(
-        _create_watershed_layer,
-        dependencies=[
-            state.selected_watershed_geojson.value,
-            state.selected_watershed_id.value
-        ]
-    )
-    
-    def update_layers():
+    def update_layers(tile_clients, current_event_date):
         """
-        Update map layers based on current layer mode.
+        Update map layers with all available data.
+        All layers are added, with Uncertainty and Permanent Water hidden by default.
 
-        Split view is always enabled:
-        - Classification mode: Left = Sentinel-2, Right = Classification
-        - Uncertainty mode: Left = Classification, Right = Uncertainty
+        Args:
+            tile_clients: Dict containing 'input', 'output', 'water' clients
+            current_event_date: String date for unique naming
         """
-        # Initialize water_layer to None
-        water_layer = None
-        global _current_split_control  # FIX: Ensure module-level variable is updated, not local
         m = map_widget
 
-        try:
-            # IMPORTANT: Remove SplitMapControl FIRST, before clearing layers
-            # This prevents orphaned visual elements
-            if _current_split_control is not None:
-                try:
-                    m.remove_control(_current_split_control)
-                    print("[STEP2] Removed existing SplitMapControl")
-                except Exception:
-                    pass  # Control might already be removed
-                _current_split_control = None
+        # Validate tile clients exist
+        if 'input' not in tile_clients or 'output' not in tile_clients:
+            raise ValueError("Missing required tile clients")
+        
+        # Clean up map first
+        cleanup_map(m)
 
-            # Also remove any other SplitMapControls (safety cleanup)
-            controls_to_remove = [ctrl for ctrl in m.controls if isinstance(ctrl, SplitMapControl)]
-            for ctrl in controls_to_remove:
-                try:
-                    m.remove_control(ctrl)
-                except Exception:
-                    pass
+        # Unique suffix to prevent browser caching
+        import time
+        unique_suffix = f"{current_event_date}_{int(time.time())}"
 
-            # Now clear layers and reset basemap
-            m.clear_layers()
-            m.add_basemap("OpenStreetMap")
+        # Layer order (bottom to top): Basemap -> Permanent Water -> S2 RGB -> Classification -> Uncertainty -> Watershed
+        # Default visibility: S2 RGB (ON), Classification (ON), Permanent Water (OFF), Uncertainty (OFF)
 
-            input_available = 'input' in tile_clients
-            output_available = 'output' in tile_clients
+        # Layer 1: Permanent Water (HIDDEN by default)
+        if 'water' in tile_clients:
+            water_layer = get_leaflet_tile_layer(
+                tile_clients['water'],
+                name="Permanent Water",
+                colormap=["#FFFFFF00", '#0000FF'],
+                vmin=0,
+                vmax=1,
+                opacity=PERMANENT_WATER_OPACITY
+            )
+            water_layer.visible = False  # Hidden by default
+            m.add_layer(water_layer)
+            print("[STEP2] Added permanent water layer (hidden by default)")
 
-            if not (input_available and output_available):
-                print("[STEP2] Missing input or output tiles")
-                return
+        # Layer 2: Sentinel-2 RGB (VISIBLE by default)
+        print(f"[STEP2] Adding S2 RGB from: {Path(INPUT_PATH).name if INPUT_PATH else 'None'}")
+        s2_layer = get_leaflet_tile_layer(
+            tile_clients['input'],
+            name="Sentinel-2 RGB",
+            indexes=[4, 3, 2],
+            vmin=0, vmax=4000, opacity=1.0
+        )
+        s2_layer.visible = True  # Visible by default
+        m.add_layer(s2_layer)
 
-            # Create layers based on mode
-            if layer_mode == "Flood Classification":
-                # Left: Sentinel-2 original image
-                # VERIFY: Ensure input is S2 file
-                if INPUT_PATH and not Path(INPUT_PATH).name.startswith('S2_'):
-                    print(f"[STEP2] ERROR: Input path is not S2: {Path(INPUT_PATH).name}")
-                    return
+        # Layer 3: Flood Classification (VISIBLE by default)
+        classification_cmap = ListedColormap(CLASSIFICATION_COLORMAP)
+        classification_layer = get_leaflet_tile_layer(
+            tile_clients['output'],
+            name="Flood Classification",
+            indexes=[1],
+            colormap=classification_cmap,
+            vmin=0, vmax=4, opacity=CLASSIFICATION_OPACITY
+        )
+        classification_layer.visible = True  # Visible by default
+        m.add_layer(classification_layer)
+        print("[STEP2] Added Flood Classification layer")
 
-                print(f"[STEP2] Creating left layer from: {Path(INPUT_PATH).name if INPUT_PATH else 'None'}")
-                left_layer = get_leaflet_tile_layer(
-                    tile_clients['input'],
-                    name="Sentinel-2",
-                    vmin=0,
-                    vmax=3500,  # S2 DN scaling for proper visualization
-                    opacity=1.0
-                )
+        # Layer 4: Model Uncertainty (HIDDEN by default)
+        uncertainty_layer = get_leaflet_tile_layer(
+            tile_clients['output'],
+            name="Model Uncertainty",
+            indexes=[2],
+            colormap='rdylgn_r',
+            vmin=0.0, vmax=1.0, opacity=0.7
+        )
+        uncertainty_layer.visible = False  # Hidden by default
+        m.add_layer(uncertainty_layer)
+        print("[STEP2] Added Uncertainty layer (hidden by default)")
 
-                # Right: Flood classification (base layer)
-                # Create custom colormap with user-defined colors
-                classification_cmap = ListedColormap(CLASSIFICATION_COLORMAP)
-                right_layer = get_leaflet_tile_layer(
-                    tile_clients['output'],
-                    name="Classification",
-                    indexes=[1],
-                    colormap=classification_cmap,  # Custom ListedColormap
-                    vmin=0,
-                    vmax=4,
-                    opacity=CLASSIFICATION_OPACITY  # 0.6 for semi-transparency
-                )
+        # Layer 5: Watershed boundary (always on top, always visible)
+        watershed_layer = _create_watershed_layer()
+        if watershed_layer:
+            m.add_layer(watershed_layer)
+            print("[STEP2] Added watershed boundary overlay")
 
-                # Permanent water overlay (on top of classification)
-                water_layer = None
-                if 'water' in tile_clients:
-                    try:
-                        # Use blue color list directly
-                        water_layer = get_leaflet_tile_layer(
-                            tile_clients['water'],
-                            name="Permanent Water",
-                            colormap=['#00000000', '#0000FF'],  # List: transparent -> pure blue
-                            opacity=PERMANENT_WATER_OPACITY  # 1.0 fully opaque
-                        )
-                    except Exception as e:
-                        print(f"[STEP2] Could not create permanent water layer: {e}")
-            else:  # Uncertainty mode
-                # Left: Flood classification
-                # Create custom colormap with user-defined colors
-                classification_cmap = ListedColormap(CLASSIFICATION_COLORMAP)
-                left_layer = get_leaflet_tile_layer(
-                    tile_clients['output'],
-                    name="Classification",
-                    indexes=[1],
-                    colormap=classification_cmap,  # Custom ListedColormap
-                    vmin=0,
-                    vmax=4,
-                    opacity=CLASSIFICATION_OPACITY  # 0.6 for semi-transparency
-                )
+        # Re-enable dragging
+        if hasattr(m, 'dragging'):
+            m.dragging = True
 
-                # Right: Uncertainty map (full range 0-1)
-                right_layer = get_leaflet_tile_layer(
-                    tile_clients['output'],
-                    name="Uncertainty",
-                    indexes=[2],
-                    colormap='rdylgn_r',  # rio-tiler uses lowercase
-                    vmin=0.0,
-                    vmax=1.0,  # Show full uncertainty range
-                    opacity=0.7
-                )
+        print(f"[STEP2] Rendered all layers for event: {current_event_date}")
 
-            # Add layers to map
-            m.add_layer(left_layer)
-            m.add_layer(right_layer)
 
-            # Add permanent water overlay AFTER classification layer
-            # In Classification mode: on top of right layer (classification)
-            # In Uncertainty mode: on top of left layer (classification)
-            if water_layer:
-                m.add_layer(water_layer)
-                print("[STEP2] Added permanent water overlay")
+    # Sync map when event changes
+    def sync_map_state():
+        if not current_event_date:
+            return
+        
+        print(f"[STEP2] Switching to event: {current_event_date}")
+        
+        # Get pre-initialized TileClients (no creation, no shutdown)
+        current_clients = _get_clients_for_event(current_event_date)
+        
+        # Update preview image
+        file_info = FILE_MAPPING.get(current_event_date, {})
+        preview_image_path.set(str(file_info.get('preview')) if file_info.get('preview') else None)
+        
+        # Reset map viewport
+        cx, cy, zoom = get_map_center()
+        map_widget.center = [cy, cx]
+        map_widget.zoom = zoom
+        
+        # Update all map layers
+        update_layers(current_clients, current_event_date)
 
-            # Create and store new SplitMapControl
-            print(f"[STEP2 DEBUG] Creating SplitMapControl:")
-            print(f"  - Left layer: {left_layer.name if hasattr(left_layer, 'name') else 'Unknown'}")
-            print(f"  - Right layer: {right_layer.name if hasattr(right_layer, 'name') else 'Unknown'}")
-            print(f"  - Mode: {layer_mode}")
-
-            _current_split_control = SplitMapControl(left_layer=left_layer, right_layer=right_layer)
-            m.add_control(_current_split_control)
-
-            # FIX: Re-enable dragging after adding SplitMapControl
-            # This fixes the ipyleaflet bug where panning/dragging gets disabled
-            if hasattr(m, 'dragging'):
-                m.dragging = True
-                print("[STEP2] Re-enabled map dragging after SplitMapControl")
-
-            # Always add watershed boundary on top
-            if watershed_layer:
-                m.add_layer(watershed_layer)
-
-            print(f"[STEP2] ✅ Rendered split-map: {layer_mode}")
-
-        except Exception as e:
-            print(f"[STEP2] Error updating layers: {e}")
-            import traceback
-            traceback.print_exc()
-    
-    # Update layers when mode or event changes
-    solara.use_effect(update_layers, dependencies=[layer_mode, current_event_date])
+    # Trigger sync when event changes (no layer_mode dependency anymore)
+    solara.use_effect(sync_map_state, dependencies=[current_event_date])
     
     # Helper function to create chart as base64 data URL
     # ========================================================================
@@ -699,9 +755,12 @@ def Page():
                 with solara.Card(elevation=0, style={"margin-top": "0.5rem", "margin-bottom": "1rem"}):
                     if current_metadata:
                         with solara.Column(gap="4px"):
+                            # Show return period from state
+                            return_period_display = state.selected_return_period.value.replace('T_', '') + '-year'
+                            solara.Text(f"Return Period: {return_period_display}", style={"font-weight": "bold"})
                             solara.Text(f"Rank: {current_metadata.get('rank', 'N/A')}", style={"font-weight": "bold"})
                             solara.Text(f"Date: {current_metadata.get('datetime', 'N/A')}")
-                            solara.Text(f"MAE: {current_metadata.get('score', 'N/A'):.4f}")
+                            solara.Text(f"RMSE: {current_metadata.get('score', 'N/A'):.4f}")
 
                     solara.Markdown("---")
 
@@ -753,128 +812,110 @@ def Page():
 
             solara.Markdown("---")
 
-            solara.Markdown("### Display Mode")
-
-            # Layer mode selection
-            solara.ToggleButtonsSingle(
-                value=map_layer_mode,
-                values=["Flood Classification", "Uncertainty"]
-            )
+            solara.Markdown("### Layers Info")
+            solara.Markdown("All layers are stacked and controlled via **Layer Manager** (top-right).")
+            solara.Markdown("")
+            solara.Markdown("**Default visibility:**")
+            solara.Markdown("- Sentinel-2 RGB")
+            solara.Markdown("- Flood Classification")
+            solara.Markdown("- Watershed Boundary")
+            solara.Markdown("- Permanent Water (hidden)")
+            solara.Markdown("- Model Uncertainty (hidden)")
 
             solara.Markdown("---")
 
-            # Display legend based on mode
-            if layer_mode == "Flood Classification":
-                solara.Markdown("### Split View")
-                solara.Markdown("**Left:** Sentinel-2 Original Image")
-                solara.Markdown("**Right:** Flood Classification + Permanent Water")
-
-                solara.Markdown("### Legend")
-                with solara.Card(elevation=0):
-                    # Use HTML for rectangular color boxes - simplified 4 categories
-                    solara.HTML(unsafe_innerHTML="""
-                        <div style="font-size: 14px; line-height: 1.8;">
-                            <p style="margin-top: 0;"><strong>Classification:</strong></p>
-                            <div style="display: flex; align-items: center; margin-bottom: 4px;">
-                                <span style="display: inline-block; width: 20px; height: 14px; background-color: #000000; margin-right: 8px; border: 1px solid #999;"></span>
-                                <span><strong>0</strong>: Invalid</span>
-                            </div>
-                            <div style="display: flex; align-items: center; margin-bottom: 4px;">
-                                <span style="display: inline-block; width: 20px; height: 14px; background-color: #d2b48c; margin-right: 8px; border: 1px solid #999;"></span>
-                                <span><strong>1</strong>: Land (Tan)</span>
-                            </div>
-                            <div style="display: flex; align-items: center; margin-bottom: 4px;">
-                                <span style="display: inline-block; width: 20px; height: 14px; background-color: #ff0000; margin-right: 8px; border: 1px solid #999;"></span>
-                                <span><strong>2</strong>: Water (Red)</span>
-                            </div>
-                            <div style="display: flex; align-items: center; margin-bottom: 12px;">
-                                <span style="display: inline-block; width: 20px; height: 14px; background-color: #ffffff; margin-right: 8px; border: 1px solid #999;"></span>
-                                <span><strong>3</strong>: Cloud (White)</span>
-                            </div>
-                            <p><strong>Permanent Water:</strong></p>
-                            <div style="display: flex; align-items: center;">
-                                <span style="display: inline-block; width: 20px; height: 14px; background-color: #0000FF; margin-right: 8px; border: 1px solid #999;"></span>
-                                <span>Permanent water (Pure Blue)</span>
-                            </div>
+            solara.Markdown("### Legend")
+            with solara.Card(elevation=0):
+                # Combined legend for all layers
+                solara.HTML(unsafe_innerHTML="""
+                    <div style="font-size: 14px; line-height: 1.8;">
+                        <p style="margin-top: 0;"><strong>Flood Classification:</strong></p>
+                        <div style="display: flex; align-items: center; margin-bottom: 4px;">
+                            <span style="display: inline-block; width: 20px; height: 14px; background-color: #000000; margin-right: 8px; border: 1px solid #999;"></span>
+                            <span><strong>0</strong>: Invalid</span>
                         </div>
-                    """)
-            else:  # Uncertainty mode
-                solara.Markdown("### Split View")
-                solara.Markdown("**Left:** Flood Classification + Permanent Water")
-                solara.Markdown("**Right:** Uncertainty Map")
-
-                solara.Markdown("### Legend")
-                with solara.Card(elevation=0):
-                    # Classification legend - simplified 4 categories
-                    solara.HTML(unsafe_innerHTML="""
-                        <div style="font-size: 14px; line-height: 1.8;">
-                            <p style="margin-top: 0;"><strong>Classification:</strong></p>
-                            <div style="display: flex; align-items: center; margin-bottom: 4px;">
-                                <span style="display: inline-block; width: 20px; height: 14px; background-color: #000000; margin-right: 8px; border: 1px solid #999;"></span>
-                                <span><strong>0</strong>: Invalid</span>
-                            </div>
-                            <div style="display: flex; align-items: center; margin-bottom: 4px;">
-                                <span style="display: inline-block; width: 20px; height: 14px; background-color: #d2b48c; margin-right: 8px; border: 1px solid #999;"></span>
-                                <span><strong>1</strong>: Land (Tan)</span>
-                            </div>
-                            <div style="display: flex; align-items: center; margin-bottom: 4px;">
-                                <span style="display: inline-block; width: 20px; height: 14px; background-color: #ff0000; margin-right: 8px; border: 1px solid #999;"></span>
-                                <span><strong>2</strong>: Water (Red)</span>
-                            </div>
-                            <div style="display: flex; align-items: center; margin-bottom: 12px;">
-                                <span style="display: inline-block; width: 20px; height: 14px; background-color: #ffffff; margin-right: 8px; border: 1px solid #999;"></span>
-                                <span><strong>3</strong>: Cloud (White)</span>
-                            </div>
-                            <p><strong>Permanent Water:</strong></p>
-                            <div style="display: flex; align-items: center; margin-bottom: 12px;">
-                                <span style="display: inline-block; width: 20px; height: 14px; background-color: #0000FF; margin-right: 8px; border: 1px solid #999;"></span>
-                                <span>Permanent water (Pure Blue)</span>
-                            </div>
-                            <p><strong>Uncertainty:</strong></p>
-                            <div style="display: flex; align-items: center; margin-bottom: 4px;">
-                                <span style="display: inline-block; width: 20px; height: 14px; background: linear-gradient(to right, #d73027, #fee08b, #1a9850); margin-right: 8px; border: 1px solid #999;"></span>
-                                <span>Red (High) → Yellow → Green (Low)</span>
-                            </div>
-                            <div style="font-size: 12px; color: #666; margin-top: 4px;">
-                                Values: 0 (certain) to 1 (uncertain)
-                            </div>
+                        <div style="display: flex; align-items: center; margin-bottom: 4px;">
+                            <span style="display: inline-block; width: 20px; height: 14px; background-color: #d2b48c; margin-right: 8px; border: 1px solid #999;"></span>
+                            <span><strong>1</strong>: Land (Tan)</span>
                         </div>
-                    """)
+                        <div style="display: flex; align-items: center; margin-bottom: 4px;">
+                            <span style="display: inline-block; width: 20px; height: 14px; background-color: #ff0000; margin-right: 8px; border: 1px solid #999;"></span>
+                            <span><strong>2</strong>: Water (Red)</span>
+                        </div>
+                        <div style="display: flex; align-items: center; margin-bottom: 12px;">
+                            <span style="display: inline-block; width: 20px; height: 14px; background-color: #ffffff; margin-right: 8px; border: 1px solid #999;"></span>
+                            <span><strong>3</strong>: Cloud (White)</span>
+                        </div>
 
-        # Display map
+                        <p><strong>Permanent Water:</strong></p>
+                        <div style="display: flex; align-items: center; margin-bottom: 12px;">
+                            <span style="display: inline-block; width: 20px; height: 14px; background-color: #0000FF; margin-right: 8px; border: 1px solid #999;"></span>
+                            <span>Permanent water (Pure Blue)</span>
+                        </div>
+
+                        <p><strong>Model Uncertainty:</strong></p>
+                        <div style="display: flex; align-items: center; margin-bottom: 4px;">
+                            <span style="display: inline-block; width: 20px; height: 14px; background: linear-gradient(to right, #d73027, #fee08b, #1a9850); margin-right: 8px; border: 1px solid #999;"></span>
+                            <span>Red (High) → Yellow → Green (Low)</span>
+                        </div>
+                        <div style="font-size: 12px; color: #666; margin-top: 4px;">
+                            Values: 0 (certain) to 1 (uncertain)
+                        </div>
+                    </div>
+                """)
+
+        # Display map (outside sidebar, inside column)
         solara.display(map_widget)
 
-        # Analytics Panel (only show if we have analog events)
-        if events_df is not None and not events_df.empty:
-            with solara.Card(style={"margin-top": "1rem", "padding": "1rem"}):
-                solara.Markdown("## Analytics Panel")
+        # # Analytics Panel (only show if we have analog events)
+        # if events_df is not None and not events_df.empty:
+        #     solara.Markdown("## Analytics Panel")
+            
+            # with solara.Card(style={"margin-top": "1rem", "padding": "1rem"}):
+            #     with solara.Columns([3, 7]):  # 3:7 ratio - Left: catalog, Right: details
+            #         # Left: Event Catalog Table (30%)
+            #         with solara.Column():
+            #             solara.Markdown("### Event Catalog")
+            #             # Display only relevant columns
+            #             display_df = events_df[['rank', 'datetime', 'score']].copy()
+            #             solara.DataFrame(display_df, items_per_page=10)
 
-                with solara.Columns([1, 1]):
-                    # Left: Event Table
-                    with solara.Column():
-                        solara.Markdown("### Event Catalog")
-                        # Display only relevant columns
-                        display_df = events_df[['rank', 'datetime', 'score']].copy()
-                        solara.DataFrame(display_df, items_per_page=10)
-
-                    # Right: Score Statistics (simplified text display)
-                    with solara.Column():
-                        solara.Markdown("### Score Statistics")
-                        if events_df is not None and not events_df.empty:
-                            with solara.Card(elevation=0):
-                                solara.Markdown(f"**Total Events:** {len(events_df)}")
-                                solara.Markdown(f"**Min Score:** {events_df['score'].min():.4f}")
-                                solara.Markdown(f"**Max Score:** {events_df['score'].max():.4f}")
-                                solara.Markdown(f"**Mean Score:** {events_df['score'].mean():.4f}")
-                                solara.Markdown(f"**Median Score:** {events_df['score'].median():.4f}")
-
-                                if current_event_date:
-                                    selected_row = events_df[events_df['datetime'] == current_event_date]
-                                    if not selected_row.empty:
-                                        solara.Markdown("---")
-                                        solara.Markdown("**Selected Event:**")
-                                        solara.Markdown(f"🔴 Score: **{selected_row['score'].values[0]:.4f}**")
-                                        solara.Markdown(f"🔴 Rank: **{selected_row['rank'].values[0]}**")
+            #         # Right: Selected Event Details (70%)
+            #         with solara.Column():
+            #             solara.Markdown("### Selected Event Details")
+            #             if current_event_date:
+            #                 selected_row = events_df[events_df['datetime'] == current_event_date]
+            #                 if not selected_row.empty:
+            #                     with solara.Card(elevation=0, style={"padding": "1rem"}):
+            #                         # Event metadata
+            #                         return_period_display = state.selected_return_period.value.replace('T_', '') + '-year'
+            #                         solara.Markdown(f"**Return Period:** {return_period_display}")
+            #                         solara.Markdown(f"**Date:** {current_event_date}")
+            #                         solara.Markdown(f"**Rank:** {selected_row['rank'].values[0]}")
+            #                         solara.Markdown(f"**RMSE Score:** {selected_row['score'].values[0]:.4f}")
+                                    
+            #                         solara.Markdown("---")
+                                    
+            #                         # GloFAS Analogue Plot
+            #                         plot_path = get_glofas_plot_path(current_event_date)
+            #                         if plot_path:
+            #                             solara.Markdown("**GloFAS Analogue Analysis:**")
+            #                             try:
+            #                                 with open(plot_path, "rb") as f:
+            #                                     img_data = base64.b64encode(f.read()).decode()
+            #                                 solara.HTML(unsafe_innerHTML=f'''
+            #                                     <div style="margin-top: 1rem;">
+            #                                         <img src="data:image/png;base64,{img_data}" style="width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px;">
+            #                                     </div>
+            #                                 ''')
+            #                             except Exception as e:
+            #                                 solara.Error(f"Failed to load plot: {e}")
+            #                         else:
+            #                             solara.Warning(f"Plot not found for {current_event_date}")
+            #                 else:
+            #                     solara.Info("Event not found in catalog")
+            #             else:
+            #                 solara.Info("No event selected")
 
 
 if __name__ == "__main__":

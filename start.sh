@@ -1,48 +1,63 @@
 #!/bin/bash
 SESSION="geemap"
 
-echo "Cleaning up..."
-PORTS="8765 9100 9101 9102"
-for port in $PORTS; do
-    echo "   Stopping process on port $port..."
-    fuser -k -n tcp $port 2>/dev/null
-done
-# Wait for ports to release
+echo "==========================="
+echo "STARTING GEEMAP APPLICATION"
+echo "==========================="
+
+# 1. Clean up any existing processes
+echo ""
+echo "Step 1: Cleaning up existing processes..."
+./stop.sh
+
+# Wait for cleanup
 sleep 2
 
-# Kill existing tmux session if it exists
-tmux kill-session -t $SESSION 2>/dev/null
+# 2. Ensure demo cache exists
+echo ""
+echo "Step 2: Checking demo cache..."
+if [ ! -d "/tmp/geemap_demo_cache" ]; then
+    echo "Demo cache not found. Generating..."
+    uv run scripts/generate_demo_tiles.py
+fi
 
-# Create new session and start Solara
-echo "Starting new session..."
+# 3. Start TileServers in background tmux session
+echo ""
+echo "Step 3: Starting TileServers..."
+tmux new-session -d -s geemap_tiles -n "tileservers"
+tmux send-keys -t geemap_tiles:tileservers "cd $(pwd)" C-m
+tmux send-keys -t geemap_tiles:tileservers "uv run python scripts/start_tileservers.py" C-m
+
+# Wait for TileServers to start
+echo "Waiting for TileServers to initialize..."
+sleep 3
+
+# 4. Start Solara Application
+echo ""
+echo "Step 4: Starting Solara application..."
 tmux new-session -d -s $SESSION -n "solara"
-
-# Start Solara Application
 tmux send-keys -t $SESSION:solara "export PYTHONUNBUFFERED=1" C-m
-# Add project root to PYTHONPATH for absolute imports
 tmux send-keys -t $SESSION:solara "export PYTHONPATH=\$(pwd):\$PYTHONPATH" C-m
-# Using --host 0.0.0.0 to ensure remote access and container support
-tmux send-keys -t $SESSION:solara "uv run solara run src/main.py --host=0.0.0.0 --port=8765" C-m
+tmux send-keys -t $SESSION:solara "export SOLARA_AUTORELOAD=false" C-m
+tmux send-keys -t $SESSION:solara "uv run solara run src/main.py --host=0.0.0.0 --port=8765 --no-open" C-m
 
-echo "tmux session '$SESSION' started."
-
+echo ""
 echo "========================================================"
 echo "APPLICATION STARTED SUCCESSFULLY"
 echo "========================================================"
 echo ""
-echo "Solara UI is running on port 8765"
+echo "Services:"
+echo "  - Solara UI:    http://localhost:8765"
+echo "  - TileServers:  ports 9100-9104 (5 servers)"
 echo ""
-echo "Using VSCode Dev Container:"
-echo "  1. VSCode will auto-forward port 8765 to your local machine"
-echo "  2. Check VSCode 'PORTS' tab (next to Terminal)"
-echo "  3. Access: http://localhost:8765 in your browser"
+echo "Tmux sessions:"
+echo "  - geemap:       Main Solara application"
+echo "  - geemap_tiles: TileServers (background)"
 echo ""
-echo "If port forwarding doesn't appear automatically:"
-echo "  - Reload VSCode window (Cmd/Ctrl + Shift + P > Reload Window)"
-echo "  - Or manually forward in PORTS tab"
-echo ""
-echo "========================================================"
 echo "Useful commands:"
-echo "  View logs:   tmux attach -t $SESSION"
-echo "  Stop app:    ./stop.sh"
+echo "  View Solara logs:      tmux attach -t geemap"
+echo "  View TileServer logs:  tmux attach -t geemap_tiles"
+echo "  Stop all:              ./stop.sh"
+echo "========================================================"
+
 echo "========================================================"

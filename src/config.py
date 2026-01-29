@@ -21,12 +21,22 @@ STEP2_NAV_LABEL = "Visualization"
 # =============================================================================
 # Port Configuration
 # =============================================================================
-# SSH forwarding: ssh -L 8765:localhost:8765 -L 9100:localhost:9100 -L 9101:localhost:9101 -L 9102:localhost:9102 user@server
+# Demo mode: Each event gets dedicated ports (never shutdown)
+# SSH forwarding: ssh -L 8765:localhost:8765 -L 9100:localhost:9100 -L 9101:localhost:9101 -L 9102:localhost:9102 -L 9103:localhost:9103 -L 9104:localhost:9104 user@server
 
 SOLARA_PORT = 8765
+# Event 2020-04-18
+EVENT_2020_INPUT_PORT = 9100
+EVENT_2020_OUTPUT_PORT = 9101
+# Event 2024-04-20
+EVENT_2024_INPUT_PORT = 9103
+EVENT_2024_OUTPUT_PORT = 9104
+# Shared permanent water
+PERMANENT_WATER_PORT = 9102
+
+# Deprecated (kept for compatibility)
 INPUT_TILE_PORT = 9100
 OUTPUT_TILE_PORT = 9101
-PERMANENT_WATER_PORT = 9102
 
 # =============================================================================
 # Map Defaults

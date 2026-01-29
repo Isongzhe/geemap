@@ -10,6 +10,21 @@ from typing import Optional, Dict, List
 import pandas as pd
 
 
+def get_glofas_plot_path(event_date: str) -> Optional[Path]:
+    """
+    Get path to GloFAS analogue plot for given event date.
+    
+    Args:
+        event_date: Event date in YYYY-MM-DD format
+        
+    Returns:
+        Path to plot file if exists, None otherwise
+    """
+    base_path = Path("/home/NAS/homes/isaac-10009/Data/Sinotech_Hackathon/plots")
+    plot_file = base_path / f"Glofas_analogue_hybas_si_lev08_3080576250_{event_date}.png"
+    return plot_file if plot_file.exists() else None
+
+
 def find_event_input(event_date: str, input_folder: str) -> Optional[Path]:
     """
     Find Sentinel-2 input file for the given event date.
