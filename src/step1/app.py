@@ -452,7 +452,7 @@ def Page():
                 
                 # Conditional input based on search mode
                 if search_mode.value == "Coordinates":
-                    solara.Markdown("_Search by Lat/Lon (±5° buffer)_")
+                    solara.Markdown("_Search by Lat/Lon_")
                     with solara.Row():
                         solara.InputText(
                             label="Latitude",
@@ -507,7 +507,7 @@ def Page():
                     sub_area = f"{info['SUB_AREA']:,.2f}" if isinstance(info['SUB_AREA'], (int, float)) else str(info['SUB_AREA'])
                     up_area = f"{info['UP_AREA']:,.2f}" if isinstance(info['UP_AREA'], (int, float)) else str(info['UP_AREA'])
 
-                    solara.Info(f"**ID:** `{info['HYBAS_ID']}`", dense=True)
+                    solara.Info(f"HYBAS ID: `{info['HYBAS_ID']}`", dense=True)
                     solara.Markdown(f"**Sub Area:** {sub_area} km²")
                     solara.Markdown(f"**Upstream Area:** {up_area} km²")
 

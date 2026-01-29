@@ -40,10 +40,27 @@ WATERSHED_ZOOM = 11
 # Visualization
 # =============================================================================
 
-CLASSIFICATION_COLORMAP = 'viridis'
-UNCERTAINTY_COLORMAP = 'rdylgn_r'
+# Classification colormap - Custom palette for flood analysis
+# Format: List of [R, G, B] values (0-255) for each class
+# Classes: 0=invalid, 1=land, 2=water, 3=cloud, 4=flood_trace
+_CLASSIFICATION_RGB = [
+    [0, 0, 0],          # 0: invalid (black/transparent)
+    [210, 180, 140],    # 1: land (tan/light brown)
+    [255, 0, 0],        # 2: water (red)
+    [255, 255, 255],    # 3: cloud (white)
+    [255, 0, 0],        # 4: flood_trace (red, same as water)
+]
+
+# Convert RGB to hex format for localtileserver
+CLASSIFICATION_COLORMAP = [f'#{r:02x}{g:02x}{b:02x}' for r, g, b in _CLASSIFICATION_RGB]
+
+UNCERTAINTY_COLORMAP = 'rdylgn_r'  # Red-Yellow-Green reversed (rio-tiler format)
 WATERSHED_COLOR = '#FFD700'
 WATERSHED_LINE_WIDTH = 4
+
+# Layer opacity settings
+CLASSIFICATION_OPACITY = 0.6  # Semi-transparent for layering
+PERMANENT_WATER_OPACITY = 1.0  # Fully opaque
 
 # =============================================================================
 # Earth Engine

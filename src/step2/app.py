@@ -15,15 +15,19 @@ Features:
 import os
 import functools
 from pathlib import Path
+import base64
 import solara
 import geemap
 import rioxarray
 import ee
 import geopandas as gpd
 import pandas as pd
-from ipyleaflet import GeoJSON, SplitMapControl
+from ipyleaflet import GeoJSON, SplitMapControl, WidgetControl, FullScreenControl
 from localtileserver import TileClient, get_leaflet_tile_layer
+from matplotlib.colors import ListedColormap
+import plotly.graph_objects as go
 from pyproj import Transformer
+from typing import Optional
 
 import src.state as state
 from src.config import (
@@ -36,6 +40,8 @@ from src.config import (
     WATERSHED_ZOOM,
     CLASSIFICATION_COLORMAP,
     UNCERTAINTY_COLORMAP,
+    CLASSIFICATION_OPACITY,
+    PERMANENT_WATER_OPACITY,
     WATERSHED_COLOR,
     WATERSHED_LINE_WIDTH,
     STEP2_TITLE,
@@ -50,6 +56,7 @@ from src.step2.utils import (
     find_event_output,
     find_event_preview,
     load_analog_catalog,
+    build_file_mapping,
 )
 
 # ============================================================================
@@ -72,6 +79,7 @@ OUTPUT_PATH = None
 WATERSHED_CFG = None
 WATERSHED_PATH = None
 WATERSHED_ID = None
+FILE_MAPPING = {}  # Cache: event_date -> {input, output, preview} paths
 
 def initialize_step2_data():
     """
@@ -85,7 +93,7 @@ def initialize_step2_data():
     Returns:
         dict with INPUT_PATH, OUTPUT_PATH, analog_df, etc.
     """
-    global INPUT_PATH, OUTPUT_PATH, WATERSHED_CFG, WATERSHED_PATH, WATERSHED_ID
+    global INPUT_PATH, OUTPUT_PATH, WATERSHED_CFG, WATERSHED_PATH, WATERSHED_ID, FILE_MAPPING
 
     # Earth Engine Initialization
     try:
@@ -149,6 +157,10 @@ def initialize_step2_data():
     WATERSHED_CFG = get_watershed_config()
     WATERSHED_PATH = WATERSHED_CFG.get("path")
     WATERSHED_ID = WATERSHED_CFG.get("default_id")
+
+    # Build file mapping cache for fast lookups
+    FILE_MAPPING = build_file_mapping(input_folder, output_folder)
+    print(f"[STEP2] File mapping cache built with {len(FILE_MAPPING)} events")
 
     return {
         "INPUT_PATH": INPUT_PATH,
@@ -233,10 +245,8 @@ def get_map_center():
 
 def _create_base_map():
     """
-    Create a base geemap.Map widget with initial settings.
-
-    Returns:
-        geemap.Map: Configured map widget
+    Create base geemap Map widget.
+    Returns a memoized map instance.
     """
     cx, cy, zoom = get_map_center()
     m = geemap.Map(
@@ -247,8 +257,10 @@ def _create_base_map():
         draw_ctrl=False,
         search_control=False,
         data_ctrl=False,
-        layer_ctrl=True  # Enable layer control widget
+        height="800px",
     )
+    # Add modern layer manager for better UX
+    m.add("layer_manager")
     return m
 
 
@@ -294,19 +306,32 @@ def _create_tile_clients_for_event(event_date: str, input_folder: str, output_fo
     Permanent water client is NOT recreated (static across events).
     Input and output clients are recreated for each event change.
 
+    Uses FILE_MAPPING cache for fast lookups instead of slow glob operations.
+
     Args:
         event_date: Event date string
-        input_folder: Folder containing input files
-        output_folder: Folder containing output files
+        input_folder: Folder containing input files (not used if cache available)
+        output_folder: Folder containing output files (not used if cache available)
 
     Returns:
         dict: Dictionary with 'input', 'output', and optionally 'water' TileClient instances
     """
     global _tile_clients_cache, INPUT_PATH, OUTPUT_PATH
 
-    # Find files for this event
-    input_file = find_event_input(event_date, input_folder)
-    output_file = find_event_output(event_date, output_folder)
+    # Use cached file mapping for fast lookup
+    if event_date in FILE_MAPPING:
+        file_info = FILE_MAPPING[event_date]
+        input_file = file_info.get('input')
+        output_file = file_info.get('output')
+        preview_file = file_info.get('preview')
+        
+        print(f"[STEP2] Using cached file mapping for event {event_date}")
+    else:
+        # Fallback to slow glob operations
+        print(f"[STEP2] WARNING: Event {event_date} not in cache, using fallback discovery")
+        input_file = find_event_input(event_date, input_folder)
+        output_file = find_event_output(event_date, output_folder)
+        preview_file = find_event_preview(event_date, output_folder)
 
     # Clear old input/output clients (but keep water client)
     # NOTE: Do NOT call shutdown() - localtileserver manages servers internally
@@ -320,10 +345,10 @@ def _create_tile_clients_for_event(event_date: str, input_folder: str, output_fo
         del _tile_clients_cache['output']
 
     # Create Input TileClient (STRICT S2 CHECK)
-    if input_file and os.path.exists(input_file):
+    if input_file and input_file.exists():
         # Double-check: Ensure file is S2 prefix
-        if not Path(input_file).name.startswith('S2_'):
-            print(f"[STEP2] ERROR: Input file is not S2: {Path(input_file).name}")
+        if not input_file.name.startswith('S2_'):
+            print(f"[STEP2] ERROR: Input file is not S2: {input_file.name}")
             INPUT_PATH = None
         else:
             INPUT_PATH = str(input_file)
@@ -334,16 +359,16 @@ def _create_tile_clients_for_event(event_date: str, input_folder: str, output_fo
                 client_port=INPUT_TILE_PORT,
                 client_host='localhost'
             )
-            print(f"[STEP2] Input TileClient created for {event_date}: {Path(input_file).name}")
+            print(f"[STEP2] Input TileClient created for {event_date}: {input_file.name}")
     else:
         INPUT_PATH = None
         print(f"[STEP2] No S2 input file found for {event_date}")
 
     # Create Output TileClient (STRICT S2 CHECK)
-    if output_file and os.path.exists(output_file):
+    if output_file and output_file.exists():
         # Double-check: Ensure file is S2 prefix
-        if not Path(output_file).name.startswith('S2_'):
-            print(f"[STEP2] ERROR: Output file is not S2: {Path(output_file).name}")
+        if not output_file.name.startswith('S2_'):
+            print(f"[STEP2] ERROR: Output file is not S2: {output_file.name}")
             OUTPUT_PATH = None
         else:
             OUTPUT_PATH = str(output_file)
@@ -354,7 +379,7 @@ def _create_tile_clients_for_event(event_date: str, input_folder: str, output_fo
                 client_port=OUTPUT_TILE_PORT,
                 client_host='localhost'
             )
-            print(f"[STEP2] Output TileClient created for {event_date}: {Path(output_file).name}")
+            print(f"[STEP2] Output TileClient created for {event_date}: {output_file.name}")
     else:
         OUTPUT_PATH = None
         print(f"[STEP2] No S2 output file found for {event_date}")
@@ -456,9 +481,14 @@ def Page():
         if current_event_date and input_folder and output_folder:
             _create_tile_clients_for_event(current_event_date, input_folder, output_folder)
 
-            # Update preview image path
-            preview_file = find_event_preview(current_event_date, output_folder)
-            preview_image_path.set(str(preview_file) if preview_file else None)
+            # Update preview image path from cache
+            if current_event_date in FILE_MAPPING:
+                preview_file = FILE_MAPPING[current_event_date].get('preview')
+                preview_image_path.set(str(preview_file) if preview_file else None)
+            else:
+                # Fallback to slow discovery
+                preview_file = find_event_preview(current_event_date, output_folder)
+                preview_image_path.set(str(preview_file) if preview_file else None)
 
             # Reset map view to watershed center after files are loaded
             if map_widget and INPUT_PATH:
@@ -489,7 +519,9 @@ def Page():
         - Classification mode: Left = Sentinel-2, Right = Classification
         - Uncertainty mode: Left = Classification, Right = Uncertainty
         """
-        global _current_split_control
+        # Initialize water_layer to None
+        water_layer = None
+        global _current_split_control  # FIX: Ensure module-level variable is updated, not local
         m = map_widget
 
         try:
@@ -534,38 +566,49 @@ def Page():
                 left_layer = get_leaflet_tile_layer(
                     tile_clients['input'],
                     name="Sentinel-2",
+                    vmin=0,
+                    vmax=3500,  # S2 DN scaling for proper visualization
                     opacity=1.0
                 )
 
                 # Right: Flood classification (base layer)
+                # Create custom colormap with user-defined colors
+                classification_cmap = ListedColormap(CLASSIFICATION_COLORMAP)
                 right_layer = get_leaflet_tile_layer(
                     tile_clients['output'],
                     name="Classification",
                     indexes=[1],
-                    colormap=CLASSIFICATION_COLORMAP,
-                    opacity=0.7
+                    colormap=classification_cmap,  # Custom ListedColormap
+                    vmin=0,
+                    vmax=4,
+                    opacity=CLASSIFICATION_OPACITY  # 0.6 for semi-transparency
                 )
 
                 # Permanent water overlay (on top of classification)
                 water_layer = None
                 if 'water' in tile_clients:
                     try:
+                        # Use blue color list directly
                         water_layer = get_leaflet_tile_layer(
                             tile_clients['water'],
                             name="Permanent Water",
-                            palette=['#00000000', '#0000FF'],  # transparent, blue
-                            opacity=0.5
+                            colormap=['#00000000', '#0000FF'],  # List: transparent -> pure blue
+                            opacity=PERMANENT_WATER_OPACITY  # 1.0 fully opaque
                         )
                     except Exception as e:
                         print(f"[STEP2] Could not create permanent water layer: {e}")
             else:  # Uncertainty mode
                 # Left: Flood classification
+                # Create custom colormap with user-defined colors
+                classification_cmap = ListedColormap(CLASSIFICATION_COLORMAP)
                 left_layer = get_leaflet_tile_layer(
                     tile_clients['output'],
                     name="Classification",
                     indexes=[1],
-                    colormap=CLASSIFICATION_COLORMAP,
-                    opacity=0.7
+                    colormap=classification_cmap,  # Custom ListedColormap
+                    vmin=0,
+                    vmax=4,
+                    opacity=CLASSIFICATION_OPACITY  # 0.6 for semi-transparency
                 )
 
                 # Right: Uncertainty map (full range 0-1)
@@ -573,7 +616,7 @@ def Page():
                     tile_clients['output'],
                     name="Uncertainty",
                     indexes=[2],
-                    colormap=UNCERTAINTY_COLORMAP,
+                    colormap='rdylgn_r',  # rio-tiler uses lowercase
                     vmin=0.0,
                     vmax=1.0,  # Show full uncertainty range
                     opacity=0.7
@@ -583,8 +626,10 @@ def Page():
             m.add_layer(left_layer)
             m.add_layer(right_layer)
 
-            # Add permanent water overlay AFTER right layer (only in Classification mode)
-            if layer_mode == "Flood Classification" and water_layer:
+            # Add permanent water overlay AFTER classification layer
+            # In Classification mode: on top of right layer (classification)
+            # In Uncertainty mode: on top of left layer (classification)
+            if water_layer:
                 m.add_layer(water_layer)
                 print("[STEP2] Added permanent water overlay")
 
@@ -614,8 +659,8 @@ def Page():
             import traceback
             traceback.print_exc()
     
-    # Update layers when mode changes (not on every threshold change)
-    solara.use_effect(update_layers, dependencies=[layer_mode])
+    # Update layers when mode or event changes
+    solara.use_effect(update_layers, dependencies=[layer_mode, current_event_date])
     
     # Helper function to create chart as base64 data URL
     # ========================================================================
@@ -726,29 +771,75 @@ def Page():
 
                 solara.Markdown("### Legend")
                 with solara.Card(elevation=0):
-                    solara.Markdown(
-                        "**Classification (Viridis):**\n\n"
-                        "- **0**: Invalid (Dark Purple)\n"
-                        "- **1**: Land (Purple-Blue)\n"
-                        "- **2**: Water (Green-Blue)\n"
-                        "- **3**: Cloud (Yellow-Green)\n"
-                        "- **4**: Flood (Yellow)\n\n"
-                        "**Permanent Water:**\n\n"
-                        "- 🔵 **Blue overlay** indicates permanent water boundaries"
-                    )
+                    # Use HTML for rectangular color boxes - simplified 4 categories
+                    solara.HTML(unsafe_innerHTML="""
+                        <div style="font-size: 14px; line-height: 1.8;">
+                            <p style="margin-top: 0;"><strong>Classification:</strong></p>
+                            <div style="display: flex; align-items: center; margin-bottom: 4px;">
+                                <span style="display: inline-block; width: 20px; height: 14px; background-color: #000000; margin-right: 8px; border: 1px solid #999;"></span>
+                                <span><strong>0</strong>: Invalid</span>
+                            </div>
+                            <div style="display: flex; align-items: center; margin-bottom: 4px;">
+                                <span style="display: inline-block; width: 20px; height: 14px; background-color: #d2b48c; margin-right: 8px; border: 1px solid #999;"></span>
+                                <span><strong>1</strong>: Land (Tan)</span>
+                            </div>
+                            <div style="display: flex; align-items: center; margin-bottom: 4px;">
+                                <span style="display: inline-block; width: 20px; height: 14px; background-color: #ff0000; margin-right: 8px; border: 1px solid #999;"></span>
+                                <span><strong>2</strong>: Water (Red)</span>
+                            </div>
+                            <div style="display: flex; align-items: center; margin-bottom: 12px;">
+                                <span style="display: inline-block; width: 20px; height: 14px; background-color: #ffffff; margin-right: 8px; border: 1px solid #999;"></span>
+                                <span><strong>3</strong>: Cloud (White)</span>
+                            </div>
+                            <p><strong>Permanent Water:</strong></p>
+                            <div style="display: flex; align-items: center;">
+                                <span style="display: inline-block; width: 20px; height: 14px; background-color: #0000FF; margin-right: 8px; border: 1px solid #999;"></span>
+                                <span>Permanent water (Pure Blue)</span>
+                            </div>
+                        </div>
+                    """)
             else:  # Uncertainty mode
                 solara.Markdown("### Split View")
-                solara.Markdown("**Left:** Flood Classification")
+                solara.Markdown("**Left:** Flood Classification + Permanent Water")
                 solara.Markdown("**Right:** Uncertainty Map")
 
-                solara.Markdown("### Uncertainty Legend")
+                solara.Markdown("### Legend")
                 with solara.Card(elevation=0):
-                    solara.Markdown(
-                        "- 🟢 **Green** = Low uncertainty (reliable)\n"
-                        "- 🟡 **Yellow** = Medium uncertainty\n"
-                        "- 🔴 **Red** = High uncertainty (unreliable)\n\n"
-                        "Values: 0 (certain) to 1 (uncertain)"
-                    )
+                    # Classification legend - simplified 4 categories
+                    solara.HTML(unsafe_innerHTML="""
+                        <div style="font-size: 14px; line-height: 1.8;">
+                            <p style="margin-top: 0;"><strong>Classification:</strong></p>
+                            <div style="display: flex; align-items: center; margin-bottom: 4px;">
+                                <span style="display: inline-block; width: 20px; height: 14px; background-color: #000000; margin-right: 8px; border: 1px solid #999;"></span>
+                                <span><strong>0</strong>: Invalid</span>
+                            </div>
+                            <div style="display: flex; align-items: center; margin-bottom: 4px;">
+                                <span style="display: inline-block; width: 20px; height: 14px; background-color: #d2b48c; margin-right: 8px; border: 1px solid #999;"></span>
+                                <span><strong>1</strong>: Land (Tan)</span>
+                            </div>
+                            <div style="display: flex; align-items: center; margin-bottom: 4px;">
+                                <span style="display: inline-block; width: 20px; height: 14px; background-color: #ff0000; margin-right: 8px; border: 1px solid #999;"></span>
+                                <span><strong>2</strong>: Water (Red)</span>
+                            </div>
+                            <div style="display: flex; align-items: center; margin-bottom: 12px;">
+                                <span style="display: inline-block; width: 20px; height: 14px; background-color: #ffffff; margin-right: 8px; border: 1px solid #999;"></span>
+                                <span><strong>3</strong>: Cloud (White)</span>
+                            </div>
+                            <p><strong>Permanent Water:</strong></p>
+                            <div style="display: flex; align-items: center; margin-bottom: 12px;">
+                                <span style="display: inline-block; width: 20px; height: 14px; background-color: #0000FF; margin-right: 8px; border: 1px solid #999;"></span>
+                                <span>Permanent water (Pure Blue)</span>
+                            </div>
+                            <p><strong>Uncertainty:</strong></p>
+                            <div style="display: flex; align-items: center; margin-bottom: 4px;">
+                                <span style="display: inline-block; width: 20px; height: 14px; background: linear-gradient(to right, #d73027, #fee08b, #1a9850); margin-right: 8px; border: 1px solid #999;"></span>
+                                <span>Red (High) → Yellow → Green (Low)</span>
+                            </div>
+                            <div style="font-size: 12px; color: #666; margin-top: 4px;">
+                                Values: 0 (certain) to 1 (uncertain)
+                            </div>
+                        </div>
+                    """)
 
         # Display map
         solara.display(map_widget)
@@ -785,14 +876,6 @@ def Page():
                                         solara.Markdown(f"🔴 Score: **{selected_row['score'].values[0]:.4f}**")
                                         solara.Markdown(f"🔴 Rank: **{selected_row['rank'].values[0]}**")
 
-
-# ============================================================================
-# Entry Point
-# ============================================================================
-
-# ============================================================================
-# Entry Point
-# ============================================================================
 
 if __name__ == "__main__":
     Page()

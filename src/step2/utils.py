@@ -167,3 +167,70 @@ def load_analog_catalog(csv_path: str, top_n: int = 10) -> Optional[pd.DataFrame
     except Exception as e:
         print(f"[STEP2] Error loading analog catalog: {e}")
         return None
+
+
+def build_file_mapping(input_folder: str, output_folder: str) -> Dict[str, Dict[str, Path]]:
+    """
+    Build a mapping table of event dates to file paths for fast lookup.
+    
+    This eliminates the need for glob operations on every event change,
+    significantly improving performance.
+    
+    Args:
+        input_folder: Folder containing input S2 files
+        output_folder: Folder containing output/prediction files
+        
+    Returns:
+        Dictionary mapping event dates to file paths:
+        {
+            "2024-04-13": {
+                "input": Path("/path/to/S2_2024-04-13_*.tif"),
+                "output": Path("/path/to/S2_2024-04-13_*_output_EDL.tif"),
+                "preview": Path("/path/to/S2_2024-04-13_*_prediction.png")
+            },
+            ...
+        }
+    
+    Example:
+        >>> mapping = build_file_mapping("/path/to/data/", "/path/to/result/")
+        >>> mapping["2024-04-13"]["input"]
+        Path("/path/to/data/S2_2024-04-13_LL_68.97_54.85_UR_69.17_55.02.tif")
+    """
+    import re
+    
+    mapping = {}
+    
+    # Build input mapping
+    input_path = Path(input_folder)
+    if input_path.exists():
+        for f in input_path.glob("S2_*.tif"):
+            # Extract date from filename: S2_YYYY-MM-DD_*.tif
+            match = re.search(r'S2_(\d{4}-\d{2}-\d{2})_', f.name)
+            if match:
+                date = match.group(1)
+                if date not in mapping:
+                    mapping[date] = {}
+                mapping[date]['input'] = f
+    
+    # Build output mapping
+    output_path = Path(output_folder)
+    if output_path.exists():
+        for f in output_path.glob("S2_*_EDL.tif"):
+            match = re.search(r'S2_(\d{4}-\d{2}-\d{2})_', f.name)
+            if match:
+                date = match.group(1)
+                if date not in mapping:
+                    mapping[date] = {}
+                mapping[date]['output'] = f
+        
+        # Build preview mapping
+        for f in output_path.glob("S2_*_prediction.png"):
+            match = re.search(r'S2_(\d{4}-\d{2}-\d{2})_', f.name)
+            if match:
+                date = match.group(1)
+                if date not in mapping:
+                    mapping[date] = {}
+                mapping[date]['preview'] = f
+    
+    print(f"[STEP2] Built file mapping for {len(mapping)} events")
+    return mapping
