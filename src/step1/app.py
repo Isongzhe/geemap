@@ -376,7 +376,7 @@ def handle_submit():
     import threading
 
     def navigate_after_delay():
-        time.sleep(5)
+        time.sleep(2)  # Simulate loading delay
         state.current_step.set(2)
         state.is_transitioning.set(False)
 
